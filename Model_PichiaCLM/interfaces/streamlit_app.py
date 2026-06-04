@@ -39,10 +39,63 @@ def gc_status_label(status: str) -> str:
     return {"ok": "正常", "low": "偏低", "high": "偏高"}.get(status, status)
 
 
+def quality_counts(analysis: dict[str, object]) -> tuple[int, int]:
+    critical = 0
+    if not analysis["valid_dna"]:
+        critical += 1
+    if not analysis["length_multiple_of_three"]:
+        critical += 1
+    if analysis["translation_matches_input"] is False:
+        critical += 1
+    critical += len(analysis["internal_stop_codons"])
+
+    warnings = len(analysis["sequence_warnings"])
+    warnings += 1 if analysis["gc_status"] != "ok" else 0
+    warnings += len(analysis["local_gc_outliers"])
+    warnings += len(analysis["restriction_sites"])
+    warnings += len(analysis["motif_hits"])
+    warnings += len(analysis["rare_codon_runs"])
+    warnings += len(analysis["homopolymers"])
+    warnings += len(analysis["tandem_repeats"])
+    warnings += len(analysis["repeated_kmers"])
+    return critical, warnings
+
+
+def quality_status(analysis: dict[str, object]) -> str:
+    critical, warnings = quality_counts(analysis)
+    if critical:
+        return "失败"
+    if warnings:
+        return "警告"
+    return "通过"
+
+
+def translation_status(analysis: dict[str, object]) -> str:
+    if analysis["translation_matches_input"] is None:
+        return "未提供参考 AA"
+    return "通过" if analysis["translation_matches_input"] else "未通过"
+
+
+def render_quality_overview(analysis: dict[str, object]) -> None:
+    critical, warnings = quality_counts(analysis)
+    status = quality_status(analysis)
+    if status == "通过":
+        st.success("总体结论: 通过当前质量检查")
+    elif status == "警告":
+        st.warning("总体结论: 存在需要复核的风险项")
+    else:
+        st.error("总体结论: 存在基础正确性问题")
+
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("结论", status)
+    col_b.metric("基础问题", critical)
+    col_c.metric("风险警告", warnings)
+
+
 def dataframe_or_success(title: str, rows: list[dict[str, object]], empty_text: str = "未发现") -> None:
     if rows:
         st.warning(f"{title}: 发现 {len(rows)} 处")
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
     else:
         st.success(f"{title}: {empty_text}")
 
@@ -181,7 +234,7 @@ def render_cds_analysis_result(result: dict[str, object], title: str = "CDS 质�
     col_a, col_b, col_c = st.columns(3)
     col_a.metric("CDS 长度", analysis["cds_length"])
     col_b.metric("密码子数量", analysis["codon_count"])
-    col_c.metric("翻译一致性", "通过" if analysis["translation_matches_input"] else "未提供/未通过")
+    col_c.metric("翻译一致性", translation_status(analysis))
 
     st.text_area("待质检 CDS", value=result["cds"], height=120, key=f"{key_prefix}_cds_text")
     st.text_area("翻译得到的 AA", value=result["translated_amino_acids"], height=100, key=f"{key_prefix}_translated_aa")
@@ -197,6 +250,7 @@ def render_cds_analysis_result(result: dict[str, object], title: str = "CDS 质�
     check_b.metric("Motif 命中", len(analysis["motif_hits"]))
     check_c.metric("非法碱基", len(analysis["invalid_bases"]))
 
+    render_quality_overview(analysis)
     render_quality_report(analysis)
     with st.expander("密码子使用对比"):
         used_rows = [
@@ -211,7 +265,7 @@ def render_cds_analysis_result(result: dict[str, object], title: str = "CDS 质�
             for row in analysis["codon_usage"]
             if row["count"] > 0
         ]
-        st.dataframe(used_rows, use_container_width=True, hide_index=True)
+        st.dataframe(used_rows, width="stretch", hide_index=True)
 
     st.download_button(
         "下载 CDS 质检报告 JSON",
@@ -246,7 +300,7 @@ def render_prediction_result(result: dict[str, object], title: str = "预测结�
     metric_d.metric("CAI 公开表", analysis["cai"]["public"])
 
     check_a, check_b, check_c, check_d = st.columns(4)
-    check_a.metric("翻译一致性", "通过" if analysis["translation_matches_input"] else "未通过")
+    check_a.metric("翻译一致性", translation_status(analysis))
     check_b.metric("酶切位点", len(analysis["restriction_sites"]))
     check_c.metric("Motif 命中", len(analysis["motif_hits"]))
     check_d.metric("连续稀有密码子", len(analysis["rare_codon_runs"]))
@@ -255,6 +309,7 @@ def render_prediction_result(result: dict[str, object], title: str = "预测结�
         "GC 阈值: 全局 35%-65%；局部 30 bp 窗口 25%-75%。"
         "公开 CAI 参考表: Kazusa Pichia pastoris taxon 4922。"
     )
+    render_quality_overview(analysis)
     render_quality_report(analysis)
     render_postprocess(result, key_prefix=key_prefix)
 
@@ -271,7 +326,7 @@ def render_prediction_result(result: dict[str, object], title: str = "预测结�
             for row in analysis["codon_usage"]
             if row["count"] > 0
         ]
-        st.dataframe(used_rows, use_container_width=True, hide_index=True)
+        st.dataframe(used_rows, width="stretch", hide_index=True)
 
     st.download_button(
         "下载分析报告 JSON",
@@ -289,7 +344,10 @@ def render_quality_report(analysis: dict[str, object]) -> None:
             st.warning(warning)
         st.success("DNA 字母检查: 通过" if analysis["valid_dna"] else "DNA 字母检查: 未通过")
         st.success("阅读框检查: 通过" if analysis["length_multiple_of_three"] else "阅读框检查: 未通过")
-        st.success("翻译一致性: 通过" if analysis["translation_matches_input"] else "翻译一致性: 未通过")
+        if analysis["translation_matches_input"] is None:
+            st.info("翻译一致性: 未提供参考 AA")
+        else:
+            st.success("翻译一致性: 通过" if analysis["translation_matches_input"] else "翻译一致性: 未通过")
         dataframe_or_success(
             "内部终止密码子",
             [{"密码子编号": codon_number} for codon_number in analysis["internal_stop_codons"]],
@@ -408,10 +466,6 @@ def records_to_csv(rows: list[dict[str, object]]) -> str:
 def sidebar_settings() -> dict[str, object]:
     with st.sidebar:
         mode = st.radio("预测模式", [DIRECT_MODE_LABEL, API_MODE_LABEL], index=0)
-        allow_unknown = st.checkbox("允许模糊氨基酸", value=False)
-        do_postprocess = st.checkbox("启用保守后处理", value=False)
-        motifs = parse_text_list(st.text_area("不想要的 motif", value="", height=90))
-        custom_sites = parse_text_list(st.text_area("自定义酶切位点", value="", height=90))
         if mode == DIRECT_MODE_LABEL:
             weights_path = st.text_input("模型权重路径", value=str(DEFAULT_WEIGHTS_PATH))
             device = st.selectbox("运行设备", ["auto", "cpu", "cuda"], index=0)
@@ -420,6 +474,12 @@ def sidebar_settings() -> dict[str, object]:
             api_url = st.text_input("API 服务地址", value="http://127.0.0.1:8000")
             weights_path = str(DEFAULT_WEIGHTS_PATH)
             device = "auto"
+        with st.expander("高级预测设置"):
+            allow_unknown = st.checkbox("允许模糊氨基酸", value=False)
+            do_postprocess = st.checkbox("启用保守后处理", value=False)
+        with st.expander("高级质检设置"):
+            motifs = parse_text_list(st.text_area("不想要的 motif", value="", height=90))
+            custom_sites = parse_text_list(st.text_area("自定义酶切位点", value="", height=90))
     return {
         "mode": mode,
         "allow_unknown": allow_unknown,
@@ -461,9 +521,13 @@ def render_batch_tab(settings: dict[str, object]) -> None:
                 output_cds = result.get("postprocess", {}).get("optimized_cds", result["cds"])
                 cds_records.append(FastaRecord(id=record.id, description="PichiaCLM optimized CDS", sequence=output_cds))
                 analysis = result["analysis"]
+                critical, warnings = quality_counts(analysis)
                 summary_rows.append(
                     {
                         "ID": record.id,
+                        "结论": quality_status(analysis),
+                        "基础问题": critical,
+                        "风险警告": warnings,
                         "AA 长度": len(result["amino_acids"]),
                         "CDS 长度": len(output_cds),
                         "GC%": analysis["gc_percent"],
@@ -480,7 +544,8 @@ def render_batch_tab(settings: dict[str, object]) -> None:
             return
 
         st.subheader("批量结果")
-        st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+        summary_rows.sort(key=lambda row: (row["基础问题"], row["风险警告"]), reverse=True)
+        st.dataframe(summary_rows, width="stretch", hide_index=True)
         st.download_button("下载 CDS FASTA", data=format_fasta(cds_records), file_name="pichiaclm_batch_cds.fasta")
         st.download_button("下载结果表格 CSV", data=records_to_csv(summary_rows), file_name="pichiaclm_batch_report.csv")
         with st.expander("逐条详细结果"):
@@ -576,9 +641,13 @@ def render_external_cds_tab(settings: dict[str, object]) -> None:
                 result["description"] = record.description
                 results.append(result)
                 analysis = result["analysis"]
+                critical, warnings = quality_counts(analysis)
                 summary_rows.append(
                     {
                         "ID": record.id,
+                        "结论": quality_status(analysis),
+                        "基础问题": critical,
+                        "风险警告": warnings,
                         "CDS 长度": analysis["cds_length"],
                         "密码子数量": analysis["codon_count"],
                         "GC%": analysis["gc_percent"],
@@ -595,7 +664,8 @@ def render_external_cds_tab(settings: dict[str, object]) -> None:
             st.error(str(exc))
             return
 
-        st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+        summary_rows.sort(key=lambda row: (row["基础问题"], row["风险警告"]), reverse=True)
+        st.dataframe(summary_rows, width="stretch", hide_index=True)
         st.download_button("下载 CDS 质检 CSV", data=records_to_csv(summary_rows), file_name="pichiaclm_cds_qc.csv")
         st.download_button(
             "下载 CDS 质检 JSON",
