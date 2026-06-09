@@ -8,6 +8,7 @@ from pathlib import Path
 
 from Model_PichiaCLM.core.analysis import analyze_cds, load_training_codon_reference
 from Model_PichiaCLM.core.biology import normalize_dna
+from Model_PichiaCLM.core.candidates import candidate_summary_rows
 from Model_PichiaCLM.core.config import DEFAULT_WEIGHTS_PATH
 from Model_PichiaCLM.core.fasta import FastaRecord, format_fasta, parse_fasta_file
 from Model_PichiaCLM.core.postprocess import conservative_postprocess
@@ -56,17 +57,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out-fasta", help="Write optimized CDS sequences to this FASTA file.")
     parser.add_argument("--out-csv", help="Write a prediction summary table to this CSV file.")
+    parser.add_argument(
+        "--num-candidates",
+        type=int,
+        default=1,
+        help="Generate multiple unique synonymous CDS candidates for a single --aa input.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.8,
+        help="Sampling temperature for multi-candidate generation. Must be greater than 0.",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible candidate sampling.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     return parser
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
     if args.cds or args.cds_fasta:
         _run_cds_analysis(args)
         return
+    if args.num_candidates > 1 and not args.aa:
+        parser.error("--num-candidates > 1 is currently supported only with a single --aa input.")
+    if args.num_candidates > 1 and args.postprocess:
+        parser.error("--postprocess is not supported together with --num-candidates > 1 in this version.")
 
     predictor = PichiaCLMPredictor(weights_path=args.weights, device=args.device)
+    if args.num_candidates > 1:
+        _run_candidate_prediction(args, predictor)
+        return
+
     records = _input_records(args)
     payload_records = []
     fasta_records = []
@@ -150,6 +173,65 @@ def main() -> None:
             print(f"Motif hits: {len(analysis_payload['motif_hits'])}")
         if args.postprocess:
             print(f"Postprocess replacements: {len(payload['postprocess']['replacements'])}")
+        print()
+
+
+def _run_candidate_prediction(args: argparse.Namespace, predictor: PichiaCLMPredictor) -> None:
+    candidate_set = predictor.predict_candidates(
+        args.aa,
+        allow_unknown=args.allow_unknown,
+        num_candidates=args.num_candidates,
+        temperature=args.temperature,
+        seed=args.seed,
+        motifs=args.motif,
+        custom_restriction_sites=args.restriction_site,
+    )
+    summary_rows = candidate_summary_rows(candidate_set)
+    fasta_records = [
+        FastaRecord(
+            id=f"candidate_{candidate.rank}_{candidate.source}",
+            description="PichiaCLM CDS candidate",
+            sequence=candidate.cds,
+        )
+        for candidate in candidate_set.candidates
+    ]
+
+    if args.out_fasta:
+        Path(args.out_fasta).write_text(format_fasta(fasta_records), encoding="utf-8")
+    if args.out_csv:
+        _write_csv(args.out_csv, summary_rows)
+
+    payload = asdict(candidate_set)
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False))
+        return
+
+    print(f"Input AA: {candidate_set.amino_acids}")
+    print(f"Requested candidates: {candidate_set.requested_candidates}")
+    print(f"Generated candidates: {candidate_set.generated_candidates}")
+    print(f"Sampling attempts: {candidate_set.attempts}")
+    if candidate_set.note:
+        print(f"Note: {candidate_set.note}")
+    print()
+    for candidate in candidate_set.candidates:
+        analysis = candidate.analysis
+        difference = candidate.difference_from_reference
+        print(f"Rank: {candidate.rank} ({candidate.source})")
+        print(f"Quality: {candidate.quality.status}; warnings={candidate.quality.warnings}")
+        print(f"GC%: {analysis.gc_percent} ({analysis.gc_status})")
+        print(f"CAI training/public: {analysis.cai.training} / {analysis.cai.public}")
+        print(
+            "Kazusa preference: "
+            f"top={candidate.codon_preference.top_preferred_percent}%, "
+            f"second={candidate.codon_preference.second_preferred_percent}%, "
+            f"lowest={candidate.codon_preference.lowest_preferred_percent}%"
+        )
+        print(
+            "Difference from reference: "
+            f"{difference.bp_differences} bp ({difference.bp_difference_percent}%), "
+            f"{difference.codon_differences} codons ({difference.codon_difference_percent}%)"
+        )
+        print(f"CDS: {candidate.cds}")
         print()
 
 

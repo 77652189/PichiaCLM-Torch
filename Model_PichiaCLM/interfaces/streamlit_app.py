@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import importlib
 import io
 import json
 from dataclasses import asdict
+from typing import Any
 
 import requests
 import streamlit as st
@@ -24,7 +26,26 @@ API_MODE_LABEL = "调用 FastAPI"
 
 @st.cache_resource(show_spinner="正在加载 PichiaCLM 模型...")
 def load_predictor(weights_path: str, device: str | None) -> PichiaCLMPredictor:
-    return PichiaCLMPredictor(weights_path=weights_path, device=device or None)
+    predictor_cls = _current_predictor_class()
+    return predictor_cls(weights_path=weights_path, device=device or None)
+
+
+def _current_predictor_class() -> type[PichiaCLMPredictor]:
+    module = importlib.import_module("Model_PichiaCLM.core.predictor")
+    if not hasattr(module.PichiaCLMPredictor, "predict_candidates"):
+        module = importlib.reload(module)
+    return module.PichiaCLMPredictor
+
+
+def load_predictor_with_candidates(weights_path: str, device: str | None) -> Any:
+    predictor = load_predictor(weights_path, device)
+    if hasattr(predictor, "predict_candidates"):
+        return predictor
+    load_predictor.clear()
+    predictor = load_predictor(weights_path, device)
+    if not hasattr(predictor, "predict_candidates"):
+        raise RuntimeError("当前运行进程仍在使用旧版模型对象，请刷新页面或重启当前 Streamlit 预览进程。")
+    return predictor
 
 
 def parse_text_list(raw_text: str) -> list[str]:
@@ -35,8 +56,24 @@ def json_dumps(payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def value_or_dash(value: object) -> object:
+    return "-" if value is None else value
+
+
 def gc_status_label(status: str) -> str:
     return {"ok": "正常", "low": "偏低", "high": "偏高"}.get(status, status)
+
+
+def quality_status_label(status: str) -> str:
+    return {"pass": "通过", "warning": "警告", "fail": "失败"}.get(status, status)
+
+
+def candidate_source_label(source: str) -> str:
+    return {
+        "reference": "基准序列",
+        "sample": "采样候选",
+        "kazusa_constrained": "Kazusa 小幅替换",
+    }.get(source, source)
 
 
 def quality_counts(analysis: dict[str, object]) -> tuple[int, int]:
@@ -76,28 +113,22 @@ def translation_status(analysis: dict[str, object]) -> str:
     return "通过" if analysis["translation_matches_input"] else "未通过"
 
 
-def render_quality_overview(analysis: dict[str, object]) -> None:
-    critical, warnings = quality_counts(analysis)
-    status = quality_status(analysis)
-    if status == "通过":
-        st.success("总体结论: 通过当前质量检查")
-    elif status == "警告":
-        st.warning("总体结论: 存在需要复核的风险项")
-    else:
-        st.error("总体结论: 存在基础正确性问题")
-
-    col_a, col_b, col_c = st.columns(3)
-    col_a.metric("结论", status)
-    col_b.metric("基础问题", critical)
-    col_c.metric("风险警告", warnings)
-
-
 def dataframe_or_success(title: str, rows: list[dict[str, object]], empty_text: str = "未发现") -> None:
     if rows:
-        st.warning(f"{title}: 发现 {len(rows)} 处")
-        st.dataframe(rows, width="stretch", hide_index=True)
+        st.warning(f"{title}: 发现 {len(rows)} 项")
+        st.dataframe(rows, use_container_width=True, hide_index=True)
     else:
         st.success(f"{title}: {empty_text}")
+
+
+def records_to_csv(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return ""
+    handle = io.StringIO()
+    writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+    writer.writeheader()
+    writer.writerows(rows)
+    return handle.getvalue()
 
 
 def predict_direct(
@@ -158,6 +189,58 @@ def predict_via_api(
     return response.json()
 
 
+def predict_candidates_direct(
+    amino_acids: str,
+    allow_unknown: bool,
+    weights_path: str,
+    device: str | None,
+    motifs: list[str],
+    custom_sites: list[str],
+    num_candidates: int,
+    temperature: float,
+    seed: int | None,
+) -> dict[str, object]:
+    predictor = load_predictor_with_candidates(weights_path, device)
+    return asdict(
+        predictor.predict_candidates(
+            amino_acids,
+            allow_unknown=allow_unknown,
+            num_candidates=num_candidates,
+            temperature=temperature,
+            seed=seed,
+            motifs=motifs,
+            custom_restriction_sites=custom_sites,
+        )
+    )
+
+
+def predict_candidates_via_api(
+    api_url: str,
+    amino_acids: str,
+    allow_unknown: bool,
+    motifs: list[str],
+    custom_sites: list[str],
+    num_candidates: int,
+    temperature: float,
+    seed: int | None,
+) -> dict[str, object]:
+    response = requests.post(
+        f"{api_url.rstrip('/')}/predict_candidates",
+        json={
+            "amino_acids": amino_acids,
+            "num_candidates": num_candidates,
+            "temperature": temperature,
+            "seed": seed,
+            "allow_unknown": allow_unknown,
+            "unwanted_motifs": motifs,
+            "custom_restriction_sites": custom_sites,
+        },
+        timeout=180,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def analyze_external_cds_direct(
     cds: str,
     expected_amino_acids: str | None,
@@ -199,19 +282,6 @@ def analyze_external_cds_via_api(
     return response.json()
 
 
-def run_cds_analysis(
-    mode: str,
-    cds: str,
-    expected_amino_acids: str | None,
-    api_url: str,
-    motifs: list[str],
-    custom_sites: list[str],
-) -> dict[str, object]:
-    if mode == DIRECT_MODE_LABEL:
-        return analyze_external_cds_direct(cds, expected_amino_acids, motifs, custom_sites)
-    return analyze_external_cds_via_api(api_url, cds, expected_amino_acids, motifs, custom_sites)
-
-
 def run_prediction(
     mode: str,
     amino_acids: str,
@@ -228,113 +298,70 @@ def run_prediction(
     return predict_via_api(api_url, amino_acids, allow_unknown, motifs, custom_sites, do_postprocess)
 
 
-def render_cds_analysis_result(result: dict[str, object], title: str = "CDS 质检结果", key_prefix: str = "cds_qc") -> None:
-    analysis = result["analysis"]
-    st.subheader(title)
+def run_candidate_prediction(
+    mode: str,
+    amino_acids: str,
+    allow_unknown: bool,
+    weights_path: str,
+    device: str | None,
+    api_url: str,
+    motifs: list[str],
+    custom_sites: list[str],
+    num_candidates: int,
+    temperature: float,
+    seed: int | None,
+) -> dict[str, object]:
+    if mode == DIRECT_MODE_LABEL:
+        return predict_candidates_direct(
+            amino_acids,
+            allow_unknown,
+            weights_path,
+            device,
+            motifs,
+            custom_sites,
+            num_candidates,
+            temperature,
+            seed,
+        )
+    return predict_candidates_via_api(
+        api_url,
+        amino_acids,
+        allow_unknown,
+        motifs,
+        custom_sites,
+        num_candidates,
+        temperature,
+        seed,
+    )
+
+
+def run_cds_analysis(
+    mode: str,
+    cds: str,
+    expected_amino_acids: str | None,
+    api_url: str,
+    motifs: list[str],
+    custom_sites: list[str],
+) -> dict[str, object]:
+    if mode == DIRECT_MODE_LABEL:
+        return analyze_external_cds_direct(cds, expected_amino_acids, motifs, custom_sites)
+    return analyze_external_cds_via_api(api_url, cds, expected_amino_acids, motifs, custom_sites)
+
+
+def render_quality_overview(analysis: dict[str, object]) -> None:
+    critical, warnings = quality_counts(analysis)
+    status = quality_status(analysis)
+    if status == "通过":
+        st.success("总体结论: 通过当前质量检查")
+    elif status == "警告":
+        st.warning("总体结论: 存在需要复核的风险项")
+    else:
+        st.error("总体结论: 存在基础正确性问题")
+
     col_a, col_b, col_c = st.columns(3)
-    col_a.metric("CDS 长度", analysis["cds_length"])
-    col_b.metric("密码子数量", analysis["codon_count"])
-    col_c.metric("翻译一致性", translation_status(analysis))
-
-    st.text_area("待质检 CDS", value=result["cds"], height=120, key=f"{key_prefix}_cds_text")
-    st.text_area("翻译得到的 AA", value=result["translated_amino_acids"], height=100, key=f"{key_prefix}_translated_aa")
-
-    metric_a, metric_b, metric_c, metric_d = st.columns(4)
-    metric_a.metric("GC 含量", f"{analysis['gc_percent']}%", gc_status_label(analysis["gc_status"]))
-    metric_b.metric("局部 GC 警告", len(analysis["local_gc_outliers"]))
-    metric_c.metric("CAI 训练数据", analysis["cai"]["training"])
-    metric_d.metric("CAI 公开表", analysis["cai"]["public"])
-
-    check_a, check_b, check_c = st.columns(3)
-    check_a.metric("酶切位点", len(analysis["restriction_sites"]))
-    check_b.metric("Motif 命中", len(analysis["motif_hits"]))
-    check_c.metric("非法碱基", len(analysis["invalid_bases"]))
-
-    render_quality_overview(analysis)
-    render_quality_report(analysis)
-    with st.expander("密码子使用对比"):
-        used_rows = [
-            {
-                "密码子": row["codon"],
-                "氨基酸": row["amino_acid"],
-                "出现次数": row["count"],
-                "本序列比例": row["sequence_fraction"],
-                "训练数据比例": row["training_fraction"],
-                "公开表比例": row["public_fraction"],
-            }
-            for row in analysis["codon_usage"]
-            if row["count"] > 0
-        ]
-        st.dataframe(used_rows, width="stretch", hide_index=True)
-
-    st.download_button(
-        "下载 CDS 质检报告 JSON",
-        data=json_dumps(result),
-        file_name="pichiaclm_cds_qc.json",
-        mime="application/json",
-        key=f"{key_prefix}_json_download",
-    )
-
-
-def render_prediction_result(result: dict[str, object], title: str = "预测结果", key_prefix: str = "result") -> None:
-    analysis = result["analysis"]
-    st.subheader(title)
-    col_a, col_b, col_c = st.columns(3)
-    col_a.metric("氨基酸长度", len(result["amino_acids"]))
-    col_b.metric("CDS 长度", len(result["cds"]))
-    col_c.metric("运行设备", result["device"])
-
-    st.text_area("优化后的 CDS", value=result["cds"], height=120, key=f"{key_prefix}_cds_text")
-    st.download_button(
-        "下载 CDS FASTA",
-        data=f">PichiaCLM_prediction\n{result['cds']}\n",
-        file_name="pichiaclm_prediction.fasta",
-        mime="text/plain",
-        key=f"{key_prefix}_cds_download",
-    )
-
-    metric_a, metric_b, metric_c, metric_d = st.columns(4)
-    metric_a.metric("GC 含量", f"{analysis['gc_percent']}%", gc_status_label(analysis["gc_status"]))
-    metric_b.metric("局部 GC 警告", len(analysis["local_gc_outliers"]))
-    metric_c.metric("CAI 训练数据", analysis["cai"]["training"])
-    metric_d.metric("CAI 公开表", analysis["cai"]["public"])
-
-    check_a, check_b, check_c, check_d = st.columns(4)
-    check_a.metric("翻译一致性", translation_status(analysis))
-    check_b.metric("酶切位点", len(analysis["restriction_sites"]))
-    check_c.metric("Motif 命中", len(analysis["motif_hits"]))
-    check_d.metric("连续稀有密码子", len(analysis["rare_codon_runs"]))
-
-    st.caption(
-        "GC 阈值: 全局 35%-65%；局部 30 bp 窗口 25%-75%。"
-        "公开 CAI 参考表: Kazusa Pichia pastoris taxon 4922。"
-    )
-    render_quality_overview(analysis)
-    render_quality_report(analysis)
-    render_postprocess(result, key_prefix=key_prefix)
-
-    with st.expander("密码子使用对比"):
-        used_rows = [
-            {
-                "密码子": row["codon"],
-                "氨基酸": row["amino_acid"],
-                "出现次数": row["count"],
-                "本序列比例": row["sequence_fraction"],
-                "训练数据比例": row["training_fraction"],
-                "公开表比例": row["public_fraction"],
-            }
-            for row in analysis["codon_usage"]
-            if row["count"] > 0
-        ]
-        st.dataframe(used_rows, width="stretch", hide_index=True)
-
-    st.download_button(
-        "下载分析报告 JSON",
-        data=json_dumps(result),
-        file_name="pichiaclm_analysis.json",
-        mime="application/json",
-        key=f"{key_prefix}_json_download",
-    )
+    col_a.metric("结论", status)
+    col_b.metric("基础问题", critical)
+    col_c.metric("风险警告", warnings)
 
 
 def render_quality_report(analysis: dict[str, object]) -> None:
@@ -429,6 +456,23 @@ def render_quality_report(analysis: dict[str, object]) -> None:
         )
 
 
+def render_codon_usage(analysis: dict[str, object]) -> None:
+    with st.expander("密码子使用对比"):
+        used_rows = [
+            {
+                "密码子": row["codon"],
+                "氨基酸": row["amino_acid"],
+                "出现次数": row["count"],
+                "本序列比例": row["sequence_fraction"],
+                "训练数据比例": row["training_fraction"],
+                "公开表比例": row["public_fraction"],
+            }
+            for row in analysis["codon_usage"]
+            if row["count"] > 0
+        ]
+        st.dataframe(used_rows, use_container_width=True, hide_index=True)
+
+
 def render_postprocess(result: dict[str, object], key_prefix: str) -> None:
     postprocess = result.get("postprocess")
     if not postprocess:
@@ -455,12 +499,174 @@ def render_postprocess(result: dict[str, object], key_prefix: str) -> None:
     dataframe_or_success("仍未解决的问题", [{"问题": item} for item in postprocess["remaining_issues"]])
 
 
-def records_to_csv(rows: list[dict[str, object]]) -> str:
-    handle = io.StringIO()
-    writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
-    writer.writeheader()
-    writer.writerows(rows)
-    return handle.getvalue()
+def render_prediction_result(result: dict[str, object], title: str = "预测结果", key_prefix: str = "result") -> None:
+    analysis = result["analysis"]
+    st.subheader(title)
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("氨基酸长度", len(result["amino_acids"]))
+    col_b.metric("CDS 长度", len(result["cds"]))
+    col_c.metric("运行设备", result["device"])
+
+    st.text_area("优化后的 CDS", value=result["cds"], height=120, key=f"{key_prefix}_cds_text")
+    st.download_button(
+        "下载 CDS FASTA",
+        data=f">PichiaCLM_prediction\n{result['cds']}\n",
+        file_name="pichiaclm_prediction.fasta",
+        mime="text/plain",
+        key=f"{key_prefix}_cds_download",
+    )
+
+    metric_a, metric_b, metric_c, metric_d = st.columns(4)
+    metric_a.metric("GC 含量", f"{analysis['gc_percent']}%", gc_status_label(analysis["gc_status"]))
+    metric_b.metric("局部 GC 警告", len(analysis["local_gc_outliers"]))
+    metric_c.metric("CAI 训练数据", value_or_dash(analysis["cai"]["training"]))
+    metric_d.metric("CAI 公开表", value_or_dash(analysis["cai"]["public"]))
+
+    check_a, check_b, check_c, check_d = st.columns(4)
+    check_a.metric("翻译一致性", translation_status(analysis))
+    check_b.metric("酶切位点", len(analysis["restriction_sites"]))
+    check_c.metric("Motif 命中", len(analysis["motif_hits"]))
+    check_d.metric("连续稀有密码子", len(analysis["rare_codon_runs"]))
+
+    st.caption("GC 阈值: 全局 35%-65%；局部 30 bp 窗口 25%-75%。公开 CAI 参考表: Kazusa Pichia pastoris taxon 4922。")
+    render_quality_overview(analysis)
+    render_quality_report(analysis)
+    render_codon_usage(analysis)
+    render_postprocess(result, key_prefix=key_prefix)
+
+    st.download_button(
+        "下载分析报告 JSON",
+        data=json_dumps(result),
+        file_name="pichiaclm_analysis.json",
+        mime="application/json",
+        key=f"{key_prefix}_json_download",
+    )
+
+
+def render_cds_analysis_result(result: dict[str, object], title: str = "CDS 质检结果", key_prefix: str = "cds_qc") -> None:
+    analysis = result["analysis"]
+    st.subheader(title)
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("CDS 长度", analysis["cds_length"])
+    col_b.metric("密码子数量", analysis["codon_count"])
+    col_c.metric("翻译一致性", translation_status(analysis))
+
+    st.text_area("待质检 CDS", value=result["cds"], height=120, key=f"{key_prefix}_cds_text")
+    st.text_area("翻译得到的 AA", value=result["translated_amino_acids"], height=100, key=f"{key_prefix}_translated_aa")
+
+    metric_a, metric_b, metric_c, metric_d = st.columns(4)
+    metric_a.metric("GC 含量", f"{analysis['gc_percent']}%", gc_status_label(analysis["gc_status"]))
+    metric_b.metric("局部 GC 警告", len(analysis["local_gc_outliers"]))
+    metric_c.metric("CAI 训练数据", value_or_dash(analysis["cai"]["training"]))
+    metric_d.metric("CAI 公开表", value_or_dash(analysis["cai"]["public"]))
+
+    check_a, check_b, check_c = st.columns(3)
+    check_a.metric("酶切位点", len(analysis["restriction_sites"]))
+    check_b.metric("Motif 命中", len(analysis["motif_hits"]))
+    check_c.metric("非法碱基", len(analysis["invalid_bases"]))
+
+    render_quality_overview(analysis)
+    render_quality_report(analysis)
+    render_codon_usage(analysis)
+    st.download_button(
+        "下载 CDS 质检报告 JSON",
+        data=json_dumps(result),
+        file_name="pichiaclm_cds_qc.json",
+        mime="application/json",
+        key=f"{key_prefix}_json_download",
+    )
+
+
+def render_candidate_set_result(result: dict[str, object]) -> None:
+    diversity = result["pairwise_diversity"]
+    st.subheader("候选对比")
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("生成候选", f"{result['generated_candidates']} / {result['requested_candidates']}")
+    col_b.metric("采样次数", result["attempts"])
+    col_c.metric("平均密码子差异", value_or_dash(diversity["mean_codon_difference_percent"]))
+    col_d.metric("最小密码子差异", value_or_dash(diversity["min_codon_difference_percent"]))
+    if result.get("note"):
+        st.info(result["note"])
+
+    rows = []
+    for candidate in result["candidates"]:
+        analysis = candidate["analysis"]
+        quality = candidate["quality"]
+        difference = candidate["difference_from_reference"]
+        preference = candidate["codon_preference"]
+        rows.append(
+            {
+                "排名": candidate["rank"],
+                "来源": candidate_source_label(candidate["source"]),
+                "结论": quality_status_label(quality["status"]),
+                "基础问题": quality["critical_issues"],
+                "风险警告": quality["warnings"],
+                "GC%": analysis["gc_percent"],
+                "CAI 训练数据": analysis["cai"]["training"],
+                "CAI 公开表": analysis["cai"]["public"],
+                "bp 差异%": difference["bp_difference_percent"],
+                "密码子差异%": difference["codon_difference_percent"],
+                "Kazusa 最优%": preference["top_preferred_percent"],
+                "Kazusa 次优%": preference["second_preferred_percent"],
+                "Kazusa 最低频%": preference["lowest_preferred_percent"],
+                "酶切位点": len(analysis["restriction_sites"]),
+                "Motif 命中": len(analysis["motif_hits"]),
+                "局部 GC 警告": len(analysis["local_gc_outliers"]),
+            }
+        )
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    fasta_records = [
+        FastaRecord(
+            id=f"candidate_{candidate['rank']}_{candidate['source']}",
+            description="PichiaCLM CDS candidate",
+            sequence=candidate["cds"],
+        )
+        for candidate in result["candidates"]
+    ]
+    col_fasta, col_csv = st.columns(2)
+    col_fasta.download_button(
+        "下载候选 CDS FASTA",
+        data=format_fasta(fasta_records),
+        file_name="pichiaclm_candidates.fasta",
+        mime="text/plain",
+    )
+    col_csv.download_button(
+        "下载候选对比 CSV",
+        data=records_to_csv(rows),
+        file_name="pichiaclm_candidates.csv",
+        mime="text/csv",
+    )
+
+    with st.expander("逐条候选详情", expanded=False):
+        for candidate in result["candidates"]:
+            analysis = candidate["analysis"]
+            difference = candidate["difference_from_reference"]
+            preference = candidate["codon_preference"]
+            st.markdown(f"### 候选 {candidate['rank']} - {candidate_source_label(candidate['source'])}")
+            st.text_area(
+                "CDS",
+                value=candidate["cds"],
+                height=110,
+                key=f"candidate_{candidate['rank']}_cds",
+            )
+            st.write(
+                f"GC {analysis['gc_percent']}%；CAI 训练数据 {value_or_dash(analysis['cai']['training'])}；"
+                f"与基准差异 {difference['bp_differences']} bp / {difference['codon_differences']} 个密码子。"
+            )
+            st.write(
+                f"Kazusa 偏好排名：最优 {preference['top_preferred_percent']}%，"
+                f"次优 {preference['second_preferred_percent']}%，"
+                f"最低频 {preference['lowest_preferred_percent']}%。"
+            )
+            render_quality_overview(analysis)
+
+    st.download_button(
+        "下载完整候选报告 JSON",
+        data=json_dumps(result),
+        file_name="pichiaclm_candidates.json",
+        mime="application/json",
+    )
 
 
 def sidebar_settings() -> dict[str, object]:
@@ -501,6 +707,41 @@ def render_single_tab(settings: dict[str, object]) -> None:
             st.error(str(exc))
             return
         render_prediction_result(result)
+
+
+def render_candidates_tab(settings: dict[str, object]) -> None:
+    amino_acids = st.text_area("氨基酸序列", value=DEFAULT_SEQUENCE, height=140, key="candidate_aa")
+    col_a, col_b, col_c = st.columns(3)
+    num_candidates = int(col_a.number_input("候选数量", min_value=2, max_value=50, value=10, step=1))
+    temperature = float(col_b.slider("采样温度", min_value=0.1, max_value=2.0, value=0.8, step=0.1))
+    use_seed = col_c.checkbox("固定随机种子", value=True)
+    seed = int(st.number_input("随机种子", min_value=0, value=42, step=1)) if use_seed else None
+    st.caption(
+        "候选序列都必须翻译回同一个 AA。当前策略从基准 CDS 出发做 10%-20% 以内的小幅同义替换，"
+        "优先使用 Kazusa 次优/中频密码子，并尽量不增加最低频密码子。"
+    )
+    if settings["do_postprocess"]:
+        st.info("多候选 CDS 默认不自动执行保守后处理；建议先选择候选，再进入单条或二次 CDS 质检流程复核。")
+
+    if st.button("生成候选 CDS", type="primary", key="candidate_predict"):
+        try:
+            result = run_candidate_prediction(
+                mode=settings["mode"],
+                amino_acids=amino_acids,
+                allow_unknown=settings["allow_unknown"],
+                weights_path=settings["weights_path"],
+                device=settings["device"],
+                api_url=settings["api_url"],
+                motifs=settings["motifs"],
+                custom_sites=settings["custom_sites"],
+                num_candidates=num_candidates,
+                temperature=temperature,
+                seed=seed,
+            )
+        except Exception as exc:
+            st.error(str(exc))
+            return
+        render_candidate_set_result(result)
 
 
 def render_batch_tab(settings: dict[str, object]) -> None:
@@ -545,54 +786,12 @@ def render_batch_tab(settings: dict[str, object]) -> None:
 
         st.subheader("批量结果")
         summary_rows.sort(key=lambda row: (row["基础问题"], row["风险警告"]), reverse=True)
-        st.dataframe(summary_rows, width="stretch", hide_index=True)
+        st.dataframe(summary_rows, use_container_width=True, hide_index=True)
         st.download_button("下载 CDS FASTA", data=format_fasta(cds_records), file_name="pichiaclm_batch_cds.fasta")
         st.download_button("下载结果表格 CSV", data=records_to_csv(summary_rows), file_name="pichiaclm_batch_report.csv")
         with st.expander("逐条详细结果"):
             for result in results:
                 render_prediction_result(result, title=f"{result['id']} 详细结果", key_prefix=f"batch_{result['id']}")
-
-
-def render_fusion_tab(settings: dict[str, object]) -> None:
-    signal = st.text_area("信号肽 AA", value="", height=100)
-    mature = st.text_area("成熟蛋白 AA", value=DEFAULT_SEQUENCE, height=140)
-    if st.button("比较整体优化与分段优化", type="primary", key="fusion_predict"):
-        try:
-            if settings["mode"] != DIRECT_MODE_LABEL:
-                st.warning("信号肽拼接对比需要直接加载模型模式。")
-                return
-            predictor = load_predictor(settings["weights_path"], settings["device"])
-            comparison = compare_signal_fusion(
-                predictor,
-                signal_peptide=signal,
-                mature_protein=mature,
-                allow_unknown=settings["allow_unknown"],
-            )
-            payload = asdict(comparison)
-        except Exception as exc:
-            st.error(str(exc))
-            return
-
-        st.subheader("信号肽拼接对比")
-        st.metric("两种 CDS 是否完全一致", "是" if payload["cds_are_identical"] else "否")
-        for label, key in [("整体优化", "whole_sequence"), ("分段优化", "segmented")]:
-            item = payload[key]
-            st.markdown(f"### {label}")
-            render_prediction_result(
-                {
-                    **item["prediction"],
-                    "analysis": item["analysis"],
-                },
-                title=f"{label}结果",
-                key_prefix=f"fusion_{key}",
-            )
-            window = item["cleavage_window"]
-            st.write(
-                f"切割位点附近窗口: AA {window['amino_acid_start']}-{window['amino_acid_end']} / "
-                f"CDS {window['cds_start']}-{window['cds_end']}"
-            )
-            st.code(window["amino_acids"], language="text")
-            st.code(window["cds"], language="text")
 
 
 def render_external_cds_tab(settings: dict[str, object]) -> None:
@@ -665,7 +864,7 @@ def render_external_cds_tab(settings: dict[str, object]) -> None:
             return
 
         summary_rows.sort(key=lambda row: (row["基础问题"], row["风险警告"]), reverse=True)
-        st.dataframe(summary_rows, width="stretch", hide_index=True)
+        st.dataframe(summary_rows, use_container_width=True, hide_index=True)
         st.download_button("下载 CDS 质检 CSV", data=records_to_csv(summary_rows), file_name="pichiaclm_cds_qc.csv")
         st.download_button(
             "下载 CDS 质检 JSON",
@@ -682,13 +881,59 @@ def render_external_cds_tab(settings: dict[str, object]) -> None:
                 )
 
 
+def render_fusion_tab(settings: dict[str, object]) -> None:
+    signal = st.text_area("信号肽 AA", value="", height=100)
+    mature = st.text_area("成熟蛋白 AA", value=DEFAULT_SEQUENCE, height=140)
+    if st.button("比较整体优化与分段优化", type="primary", key="fusion_predict"):
+        try:
+            if settings["mode"] != DIRECT_MODE_LABEL:
+                st.warning("信号肽拼接对比需要直接加载模型模式。")
+                return
+            predictor = load_predictor(settings["weights_path"], settings["device"])
+            comparison = compare_signal_fusion(
+                predictor,
+                signal_peptide=signal,
+                mature_protein=mature,
+                allow_unknown=settings["allow_unknown"],
+            )
+            payload = asdict(comparison)
+        except Exception as exc:
+            st.error(str(exc))
+            return
+
+        st.subheader("信号肽拼接对比")
+        st.metric("两种 CDS 是否完全一致", "是" if payload["cds_are_identical"] else "否")
+        for label, key in [("整体优化", "whole_sequence"), ("分段优化", "segmented")]:
+            item = payload[key]
+            st.markdown(f"### {label}")
+            render_prediction_result(
+                {
+                    **item["prediction"],
+                    "analysis": item["analysis"],
+                },
+                title=f"{label}结果",
+                key_prefix=f"fusion_{key}",
+            )
+            window = item["cleavage_window"]
+            st.write(
+                f"切割位点附近窗口: AA {window['amino_acid_start']}-{window['amino_acid_end']} / "
+                f"CDS {window['cds_start']}-{window['cds_end']}"
+            )
+            st.code(window["amino_acids"], language="text")
+            st.code(window["cds"], language="text")
+
+
 def main() -> None:
     st.set_page_config(page_title="PichiaCLM", page_icon="DNA", layout="wide")
     st.title("PichiaCLM 氨基酸序列转 CDS")
     settings = sidebar_settings()
-    tab_single, tab_batch, tab_external, tab_fusion = st.tabs(["单条预测", "FASTA 批量", "二次优化 CDS 质检", "信号肽拼接"])
+    tab_single, tab_candidates, tab_batch, tab_external, tab_fusion = st.tabs(
+        ["单条预测", "多候选 CDS", "FASTA 批量", "二次优化 CDS 质检", "信号肽拼接"]
+    )
     with tab_single:
         render_single_tab(settings)
+    with tab_candidates:
+        render_candidates_tab(settings)
     with tab_batch:
         render_batch_tab(settings)
     with tab_external:

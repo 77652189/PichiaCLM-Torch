@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 import torch
 
@@ -31,10 +31,74 @@ class PichiaCLMPredictor:
         self.model.eval()
 
     def predict(self, amino_acids: str, allow_unknown: bool = False) -> PredictionResult:
+        return self._predict_with_strategy(
+            amino_acids,
+            allow_unknown=allow_unknown,
+            decode_strategy="argmax",
+            temperature=1.0,
+            generator=None,
+        )
+
+    def predict_sample(
+        self,
+        amino_acids: str,
+        allow_unknown: bool = False,
+        temperature: float = 0.8,
+        generator: torch.Generator | None = None,
+    ) -> PredictionResult:
+        return self._predict_with_strategy(
+            amino_acids,
+            allow_unknown=allow_unknown,
+            decode_strategy="sample",
+            temperature=temperature,
+            generator=generator,
+        )
+
+    def predict_candidates(
+        self,
+        amino_acids: str,
+        *,
+        allow_unknown: bool = False,
+        num_candidates: int = 10,
+        temperature: float = 0.8,
+        seed: int | None = None,
+        max_attempts: int | None = None,
+        motifs: Iterable[str] | None = None,
+        custom_restriction_sites: Iterable[str] | None = None,
+    ):
+        from .candidates import CandidateGenerationOptions, generate_cds_candidates
+
+        return generate_cds_candidates(
+            self,
+            amino_acids,
+            options=CandidateGenerationOptions(
+                num_candidates=num_candidates,
+                temperature=temperature,
+                seed=seed,
+                max_attempts=max_attempts,
+            ),
+            allow_unknown=allow_unknown,
+            motifs=motifs,
+            custom_restriction_sites=custom_restriction_sites,
+        )
+
+    def _predict_with_strategy(
+        self,
+        amino_acids: str,
+        allow_unknown: bool,
+        decode_strategy: Literal["argmax", "sample"],
+        temperature: float,
+        generator: torch.Generator | None,
+    ) -> PredictionResult:
         normalized = normalize_amino_acids(amino_acids)
         aa_indices = self._encode_amino_acids(normalized, allow_unknown=allow_unknown)
         aa_tensor = torch.tensor([aa_indices + [AA_EOS_IDX]], dtype=torch.long, device=self.device)
-        codon_ids = self._translate_aa_to_cds(aa_tensor)
+        codon_ids = self._translate_aa_to_cds(
+            aa_tensor,
+            decode_strategy=decode_strategy,
+            temperature=temperature,
+            generator=generator,
+        )
         cds = "".join(self.idx_to_codon.get(idx, "") for idx in codon_ids)
         return PredictionResult(
             amino_acids=normalized,
@@ -61,7 +125,16 @@ class PichiaCLMPredictor:
             raise ValueError(f"Unsupported amino acid character(s): {unique}")
         return encoded
 
-    def _translate_aa_to_cds(self, aa_tensor: torch.Tensor) -> list[int]:
+    def _translate_aa_to_cds(
+        self,
+        aa_tensor: torch.Tensor,
+        decode_strategy: Literal["argmax", "sample"] = "argmax",
+        temperature: float = 1.0,
+        generator: torch.Generator | None = None,
+    ) -> list[int]:
+        if decode_strategy == "sample" and temperature <= 0:
+            raise ValueError("Sampling temperature must be greater than 0.")
+
         predicted_cds_indices: list[int] = []
         with torch.no_grad():
             enc_emb_out = self.model.enc_emb(aa_tensor)
@@ -91,7 +164,18 @@ class PichiaCLMPredictor:
                         mask[0, codon_id] = 0.0
                     current_logits = current_logits + mask
 
-                next_token = torch.argmax(current_logits, dim=-1).item()
+                if decode_strategy == "sample":
+                    probabilities = torch.softmax(current_logits / temperature, dim=-1)
+                    if torch.isnan(probabilities).any() or probabilities.sum().item() <= 0:
+                        next_token = torch.argmax(current_logits, dim=-1).item()
+                    else:
+                        next_token = torch.multinomial(
+                            probabilities[0],
+                            num_samples=1,
+                            generator=generator,
+                        ).item()
+                else:
+                    next_token = torch.argmax(current_logits, dim=-1).item()
                 predicted_cds_indices.append(next_token)
                 decoder_input = torch.tensor([[next_token]], dtype=torch.long, device=self.device)
 

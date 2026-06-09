@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import unittest
 
+import torch
+
 from Model_PichiaCLM.core.analysis import analyze_cds, load_training_codon_reference
 from Model_PichiaCLM.core.biology import check_translation, translate_cds
+from Model_PichiaCLM.core.candidates import (
+    CandidateGenerationOptions,
+    codon_preference_stats,
+    compare_cds,
+    generate_cds_candidates,
+)
 from Model_PichiaCLM.core.fasta import FastaRecord, format_fasta, parse_fasta
 from Model_PichiaCLM.core.fusion import compare_signal_fusion
 from Model_PichiaCLM.core.postprocess import conservative_postprocess
@@ -111,22 +119,100 @@ class FusionTests(unittest.TestCase):
         self.assertEqual(comparison.whole_sequence.cleavage_window.amino_acids, "MSTP")
 
 
+class CandidateGenerationTests(unittest.TestCase):
+    def test_candidates_translate_to_input_and_are_reproducible(self) -> None:
+        predictor = FakePredictor()
+        options = CandidateGenerationOptions(num_candidates=5, seed=42, max_attempts=100)
+        first = generate_cds_candidates(predictor, "MSTNPKPQR", options=options)
+        second = generate_cds_candidates(predictor, "MSTNPKPQR", options=options)
+
+        self.assertEqual([candidate.cds for candidate in first.candidates], [candidate.cds for candidate in second.candidates])
+        self.assertLessEqual(first.generated_candidates, 5)
+        self.assertGreater(len({candidate.cds for candidate in first.candidates}), 1)
+        for candidate in first.candidates:
+            self.assertEqual(candidate.analysis.translated_amino_acids, "MSTNPKPQR")
+            self.assertTrue(candidate.analysis.translation_matches_input)
+            self.assertLessEqual(candidate.difference_from_reference.codon_difference_percent, 20.0)
+            self.assertLessEqual(
+                candidate.codon_preference.avoidable_lowest_count,
+                first.candidates[0].codon_preference.avoidable_lowest_count,
+            )
+
+    def test_candidate_generation_reports_exhausted_design_space(self) -> None:
+        predictor = FakePredictor()
+        result = generate_cds_candidates(
+            predictor,
+            "MWMWM",
+            options=CandidateGenerationOptions(num_candidates=3, seed=7, max_attempts=5),
+        )
+
+        self.assertEqual(result.generated_candidates, 1)
+        self.assertTrue(result.exhausted)
+        self.assertIsNotNone(result.note)
+
+    def test_cds_difference_metrics(self) -> None:
+        difference = compare_cds("AAACCC", "AAAGGG")
+        self.assertEqual(difference.bp_differences, 3)
+        self.assertEqual(difference.bp_difference_percent, 50.0)
+        self.assertEqual(difference.codon_differences, 1)
+        self.assertEqual(difference.codon_difference_percent, 50.0)
+
+    def test_kazusa_codon_preference_stats(self) -> None:
+        stats = codon_preference_stats("GCTGCCGCG")
+        self.assertEqual(stats.codon_count, 3)
+        self.assertEqual(stats.top_preferred_count, 1)
+        self.assertEqual(stats.second_preferred_count, 1)
+        self.assertEqual(stats.lowest_preferred_count, 1)
+        self.assertEqual(stats.avoidable_lowest_count, 1)
+
+
 class FakePredictor:
+    device = torch.device("cpu")
     codons = {
-        "M": "ATG",
-        "S": "TCT",
-        "T": "ACT",
-        "P": "CCT",
-        "E": "GAA",
-        "F": "TTC",
+        "M": ["ATG"],
+        "S": ["TCT", "TCC", "TCA", "TCG", "AGT", "AGC"],
+        "T": ["ACT", "ACC", "ACA", "ACG"],
+        "N": ["AAT", "AAC"],
+        "P": ["CCT", "CCC", "CCA", "CCG"],
+        "K": ["AAA", "AAG"],
+        "Q": ["CAA", "CAG"],
+        "R": ["CGT", "CGC", "CGA", "CGG", "AGA", "AGG"],
+        "E": ["GAA", "GAG"],
+        "F": ["TTC", "TTT"],
+        "W": ["TGG"],
     }
 
     def predict(self, amino_acids: str, allow_unknown: bool = False) -> PredictionResult:
-        cds = "".join(self.codons[aa] for aa in amino_acids)
+        cds = "".join(self.codons[aa][0] for aa in amino_acids)
         return PredictionResult(
             amino_acids=amino_acids,
             cds=cds,
             codon_ids=list(range(1, len(amino_acids) + 1)),
+            device="test",
+        )
+
+    def predict_sample(
+        self,
+        amino_acids: str,
+        allow_unknown: bool = False,
+        temperature: float = 0.8,
+        generator: torch.Generator | None = None,
+    ) -> PredictionResult:
+        codons = []
+        codon_ids = []
+        for position, aa in enumerate(amino_acids, start=1):
+            choices = self.codons[aa]
+            if len(choices) == 1:
+                selected = 0
+            else:
+                weights = torch.ones(len(choices)) / temperature
+                selected = torch.multinomial(weights, 1, generator=generator).item()
+            codons.append(choices[selected])
+            codon_ids.append(position * 10 + selected)
+        return PredictionResult(
+            amino_acids=amino_acids,
+            cds="".join(codons),
+            codon_ids=codon_ids,
             device="test",
         )
 

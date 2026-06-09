@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 from dataclasses import asdict
 from functools import lru_cache
@@ -45,6 +46,16 @@ class PredictBatchRequest(BaseModel):
     postprocess: bool = False
 
 
+class PredictCandidatesRequest(BaseModel):
+    amino_acids: str = Field(..., examples=["MSTNPKPQR"])
+    num_candidates: int = Field(default=10, ge=1, le=100)
+    temperature: float = Field(default=0.8, gt=0)
+    seed: int | None = None
+    allow_unknown: bool = False
+    unwanted_motifs: list[str] = Field(default_factory=list)
+    custom_restriction_sites: list[str] = Field(default_factory=list)
+
+
 class PredictResponse(BaseModel):
     id: str | None = None
     description: str | None = None
@@ -58,6 +69,18 @@ class PredictResponse(BaseModel):
 
 class PredictBatchResponse(BaseModel):
     records: list[PredictResponse]
+
+
+class PredictCandidatesResponse(BaseModel):
+    amino_acids: str
+    reference_cds: str
+    requested_candidates: int
+    generated_candidates: int
+    attempts: int
+    exhausted: bool
+    note: str | None = None
+    pairwise_diversity: dict[str, Any]
+    candidates: list[dict[str, Any]]
 
 
 class AnalyzeCdsRequest(BaseModel):
@@ -90,7 +113,26 @@ class AnalyzeCdsBatchResponse(BaseModel):
 def get_predictor() -> PichiaCLMPredictor:
     weights_path = os.environ.get("PICHIA_CLM_WEIGHTS", str(DEFAULT_WEIGHTS_PATH))
     device = os.environ.get("PICHIA_CLM_DEVICE") or None
-    return PichiaCLMPredictor(weights_path=weights_path, device=device)
+    predictor_cls = _current_predictor_class()
+    return predictor_cls(weights_path=weights_path, device=device)
+
+
+def _current_predictor_class() -> type[PichiaCLMPredictor]:
+    module = importlib.import_module("Model_PichiaCLM.core.predictor")
+    if not hasattr(module.PichiaCLMPredictor, "predict_candidates"):
+        module = importlib.reload(module)
+    return module.PichiaCLMPredictor
+
+
+def get_predictor_with_candidates() -> PichiaCLMPredictor:
+    predictor = get_predictor()
+    if hasattr(predictor, "predict_candidates"):
+        return predictor
+    get_predictor.cache_clear()
+    predictor = get_predictor()
+    if not hasattr(predictor, "predict_candidates"):
+        raise RuntimeError("The running API process is still using an older predictor class.")
+    return predictor
 
 
 app = FastAPI(title="PichiaCLM Torch API", version="0.1.0")
@@ -136,6 +178,23 @@ def predict_batch(request: PredictBatchRequest) -> dict[str, object]:
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"records": records}
+
+
+@app.post("/predict_candidates", response_model=PredictCandidatesResponse)
+def predict_candidates(request: PredictCandidatesRequest) -> dict[str, object]:
+    try:
+        candidate_set = get_predictor_with_candidates().predict_candidates(
+            request.amino_acids,
+            allow_unknown=request.allow_unknown,
+            num_candidates=request.num_candidates,
+            temperature=request.temperature,
+            seed=request.seed,
+            motifs=request.unwanted_motifs,
+            custom_restriction_sites=request.custom_restriction_sites,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return asdict(candidate_set)
 
 
 @app.post("/analyze_cds", response_model=AnalyzeCdsResponse)

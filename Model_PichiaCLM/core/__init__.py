@@ -5,6 +5,7 @@ This package intentionally has no dependency on FastAPI, Streamlit, or CLI code.
 
 from .analysis import SequenceAnalysisReport, analyze_cds
 from .biology import TranslationCheck, check_translation, translate_cds
+from .candidates import CandidateGenerationOptions, CandidateSet, CdsCandidate, generate_cds_candidates
 from .fasta import FastaRecord, format_fasta, parse_fasta
 from .fusion import FusionComparison, compare_signal_fusion
 from .postprocess import PostprocessResult, conservative_postprocess
@@ -14,6 +15,9 @@ from .schemas import PredictionResult
 
 __all__ = [
     "FastaRecord",
+    "CandidateGenerationOptions",
+    "CandidateSet",
+    "CdsCandidate",
     "FusionComparison",
     "PichiaCLMPredictor",
     "PostprocessResult",
@@ -27,6 +31,7 @@ __all__ = [
     "compare_signal_fusion",
     "conservative_postprocess",
     "format_fasta",
+    "generate_cds_candidates",
     "parse_fasta",
     "scan_restriction_sites",
     "translate_cds",
