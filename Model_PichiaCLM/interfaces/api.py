@@ -49,6 +49,7 @@ class PredictBatchRequest(BaseModel):
 class PredictCandidatesRequest(BaseModel):
     amino_acids: str = Field(..., examples=["MSTNPKPQR"])
     num_candidates: int = Field(default=10, ge=1, le=100)
+    subset_size: int | None = Field(default=5, ge=1, le=100)
     temperature: float = Field(default=0.8, gt=0)
     seed: int | None = None
     allow_unknown: bool = False
@@ -80,6 +81,8 @@ class PredictCandidatesResponse(BaseModel):
     exhausted: bool
     note: str | None = None
     pairwise_diversity: dict[str, Any]
+    pairwise_similarities: list[dict[str, Any]]
+    recommended_subset: dict[str, Any] | None = None
     candidates: list[dict[str, Any]]
 
 
@@ -189,6 +192,7 @@ def predict_candidates(request: PredictCandidatesRequest) -> dict[str, object]:
             num_candidates=request.num_candidates,
             temperature=request.temperature,
             seed=request.seed,
+            subset_size=request.subset_size,
             motifs=request.unwanted_motifs,
             custom_restriction_sites=request.custom_restriction_sites,
         )

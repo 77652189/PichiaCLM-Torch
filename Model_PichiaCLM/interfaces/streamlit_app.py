@@ -73,6 +73,7 @@ def candidate_source_label(source: str) -> str:
         "reference": "基准序列",
         "sample": "采样候选",
         "kazusa_constrained": "Kazusa 小幅替换",
+        "kazusa_diverse": "Kazusa 多样性优化",
     }.get(source, source)
 
 
@@ -197,6 +198,7 @@ def predict_candidates_direct(
     motifs: list[str],
     custom_sites: list[str],
     num_candidates: int,
+    subset_size: int,
     temperature: float,
     seed: int | None,
 ) -> dict[str, object]:
@@ -206,6 +208,7 @@ def predict_candidates_direct(
             amino_acids,
             allow_unknown=allow_unknown,
             num_candidates=num_candidates,
+            subset_size=subset_size,
             temperature=temperature,
             seed=seed,
             motifs=motifs,
@@ -221,6 +224,7 @@ def predict_candidates_via_api(
     motifs: list[str],
     custom_sites: list[str],
     num_candidates: int,
+    subset_size: int,
     temperature: float,
     seed: int | None,
 ) -> dict[str, object]:
@@ -229,6 +233,7 @@ def predict_candidates_via_api(
         json={
             "amino_acids": amino_acids,
             "num_candidates": num_candidates,
+            "subset_size": subset_size,
             "temperature": temperature,
             "seed": seed,
             "allow_unknown": allow_unknown,
@@ -308,6 +313,7 @@ def run_candidate_prediction(
     motifs: list[str],
     custom_sites: list[str],
     num_candidates: int,
+    subset_size: int,
     temperature: float,
     seed: int | None,
 ) -> dict[str, object]:
@@ -320,6 +326,7 @@ def run_candidate_prediction(
             motifs,
             custom_sites,
             num_candidates,
+            subset_size,
             temperature,
             seed,
         )
@@ -330,6 +337,7 @@ def run_candidate_prediction(
         motifs,
         custom_sites,
         num_candidates,
+        subset_size,
         temperature,
         seed,
     )
@@ -579,6 +587,8 @@ def render_cds_analysis_result(result: dict[str, object], title: str = "CDS 质�
 
 def render_candidate_set_result(result: dict[str, object]) -> None:
     diversity = result["pairwise_diversity"]
+    recommended_subset = result.get("recommended_subset")
+    recommended_ranks = set(recommended_subset["selected_ranks"]) if recommended_subset else set()
     st.subheader("候选对比")
     col_a, col_b, col_c, col_d = st.columns(4)
     col_a.metric("生成候选", f"{result['generated_candidates']} / {result['requested_candidates']}")
@@ -597,6 +607,7 @@ def render_candidate_set_result(result: dict[str, object]) -> None:
         rows.append(
             {
                 "排名": candidate["rank"],
+                "推荐子集": "是" if candidate["rank"] in recommended_ranks else "",
                 "来源": candidate_source_label(candidate["source"]),
                 "结论": quality_status_label(quality["status"]),
                 "基础问题": quality["critical_issues"],
@@ -615,6 +626,77 @@ def render_candidate_set_result(result: dict[str, object]) -> None:
             }
         )
     st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    pairwise_rows = result.get("pairwise_similarities", [])
+    if pairwise_rows:
+        similarity_values = [row["codon_similarity_percent"] for row in pairwise_rows]
+        st.subheader("候选间相似度")
+        sim_a, sim_b, sim_c = st.columns(3)
+        sim_a.metric("平均密码子相似度", value_or_dash(round(sum(similarity_values) / len(similarity_values), 2)))
+        sim_b.metric("最高密码子相似度", value_or_dash(max(similarity_values)))
+        sim_c.metric("最低密码子相似度", value_or_dash(min(similarity_values)))
+        st.caption("相似度越低，说明两条 CDS 在同义密码子选择上越不一样；所有序列仍应翻译回同一个蛋白。")
+        similarity_table = [
+            {
+                "候选 A": row["left_rank"],
+                "候选 B": row["right_rank"],
+                "密码子相似度%": row["codon_similarity_percent"],
+                "密码子差异%": row["codon_difference_percent"],
+                "bp 相似度%": row["bp_similarity_percent"],
+                "bp 差异%": row["bp_difference_percent"],
+            }
+            for row in pairwise_rows
+        ]
+        st.dataframe(similarity_table, use_container_width=True, hide_index=True)
+
+    if recommended_subset:
+        st.subheader("推荐低相似度子集")
+        subset_a, subset_b, subset_c = st.columns(3)
+        subset_a.metric("推荐条数", f"{recommended_subset['selected_size']} / {recommended_subset['requested_size']}")
+        subset_b.metric("平均密码子相似度", value_or_dash(recommended_subset["mean_codon_similarity_percent"]))
+        subset_c.metric("最高密码子相似度", value_or_dash(recommended_subset["max_codon_similarity_percent"]))
+        st.write("推荐候选排名：" + "、".join(str(rank) for rank in recommended_subset["selected_ranks"]))
+        st.caption("这组序列是在已生成候选中挑出的低相似度组合；所有序列仍保留各自的翻译一致性和质量检查结果。")
+        subset_pair_rows = [
+            {
+                "候选 A": row["left_rank"],
+                "候选 B": row["right_rank"],
+                "密码子相似度%": row["codon_similarity_percent"],
+                "密码子差异%": row["codon_difference_percent"],
+                "bp 相似度%": row["bp_similarity_percent"],
+                "bp 差异%": row["bp_difference_percent"],
+            }
+            for row in pairwise_rows
+            if row["left_rank"] in recommended_ranks and row["right_rank"] in recommended_ranks
+        ]
+        if subset_pair_rows:
+            st.dataframe(subset_pair_rows, use_container_width=True, hide_index=True)
+        selected_candidates = [
+            candidate for candidate in result["candidates"]
+            if candidate["rank"] in recommended_ranks
+        ]
+        selected_fasta_records = [
+            FastaRecord(
+                id=f"candidate_{candidate['rank']}_{candidate['source']}",
+                description="PichiaCLM low-similarity CDS subset",
+                sequence=candidate["cds"],
+            )
+            for candidate in selected_candidates
+        ]
+        selected_rows = [row for row in rows if row["排名"] in recommended_ranks]
+        subset_fasta_col, subset_csv_col = st.columns(2)
+        subset_fasta_col.download_button(
+            "下载推荐子集 FASTA",
+            data=format_fasta(selected_fasta_records),
+            file_name="pichiaclm_low_similarity_subset.fasta",
+            mime="text/plain",
+        )
+        subset_csv_col.download_button(
+            "下载推荐子集 CSV",
+            data=records_to_csv(selected_rows),
+            file_name="pichiaclm_low_similarity_subset.csv",
+            mime="text/csv",
+        )
 
     fasta_records = [
         FastaRecord(
@@ -711,10 +793,19 @@ def render_single_tab(settings: dict[str, object]) -> None:
 
 def render_candidates_tab(settings: dict[str, object]) -> None:
     amino_acids = st.text_area("氨基酸序列", value=DEFAULT_SEQUENCE, height=140, key="candidate_aa")
-    col_a, col_b, col_c = st.columns(3)
+    col_a, col_b, col_c, col_d = st.columns(4)
     num_candidates = int(col_a.number_input("候选数量", min_value=2, max_value=50, value=10, step=1))
-    temperature = float(col_b.slider("采样温度", min_value=0.1, max_value=2.0, value=0.8, step=0.1))
-    use_seed = col_c.checkbox("固定随机种子", value=True)
+    subset_size = int(
+        col_b.number_input(
+            "推荐子集大小",
+            min_value=1,
+            max_value=num_candidates,
+            value=min(5, num_candidates),
+            step=1,
+        )
+    )
+    temperature = float(col_c.slider("采样温度", min_value=0.1, max_value=2.0, value=0.8, step=0.1))
+    use_seed = col_d.checkbox("固定随机种子", value=True)
     seed = int(st.number_input("随机种子", min_value=0, value=42, step=1)) if use_seed else None
     st.caption(
         "候选序列都必须翻译回同一个 AA。当前策略从基准 CDS 出发做 10%-20% 以内的小幅同义替换，"
@@ -735,6 +826,7 @@ def render_candidates_tab(settings: dict[str, object]) -> None:
                 motifs=settings["motifs"],
                 custom_sites=settings["custom_sites"],
                 num_candidates=num_candidates,
+                subset_size=subset_size,
                 temperature=temperature,
                 seed=seed,
             )

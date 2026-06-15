@@ -63,6 +63,7 @@ class PichiaCLMPredictor:
         temperature: float = 0.8,
         seed: int | None = None,
         max_attempts: int | None = None,
+        subset_size: int | None = 5,
         motifs: Iterable[str] | None = None,
         custom_restriction_sites: Iterable[str] | None = None,
     ):
@@ -76,6 +77,7 @@ class PichiaCLMPredictor:
                 temperature=temperature,
                 seed=seed,
                 max_attempts=max_attempts,
+                subset_size=subset_size,
             ),
             allow_unknown=allow_unknown,
             motifs=motifs,

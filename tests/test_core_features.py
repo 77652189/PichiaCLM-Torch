@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from itertools import combinations
 
 import torch
 
@@ -122,17 +123,38 @@ class FusionTests(unittest.TestCase):
 class CandidateGenerationTests(unittest.TestCase):
     def test_candidates_translate_to_input_and_are_reproducible(self) -> None:
         predictor = FakePredictor()
-        options = CandidateGenerationOptions(num_candidates=5, seed=42, max_attempts=100)
+        options = CandidateGenerationOptions(num_candidates=5, seed=42, max_attempts=100, subset_size=3)
         first = generate_cds_candidates(predictor, "MSTNPKPQR", options=options)
         second = generate_cds_candidates(predictor, "MSTNPKPQR", options=options)
 
         self.assertEqual([candidate.cds for candidate in first.candidates], [candidate.cds for candidate in second.candidates])
         self.assertLessEqual(first.generated_candidates, 5)
         self.assertGreater(len({candidate.cds for candidate in first.candidates}), 1)
+        expected_pairs = first.generated_candidates * (first.generated_candidates - 1) // 2
+        self.assertEqual(len(first.pairwise_similarities), expected_pairs)
+        self.assertEqual(first.pairwise_diversity.comparisons, expected_pairs)
+        self.assertIsNotNone(first.pairwise_diversity.mean_codon_difference_percent)
+        self.assertIsNotNone(first.recommended_subset)
+        self.assertEqual(first.recommended_subset.selected_size, 3)
+        self.assertEqual(first.recommended_subset.comparisons, 3)
+        candidate_ranks = {candidate.rank for candidate in first.candidates}
+        self.assertTrue(set(first.recommended_subset.selected_ranks).issubset(candidate_ranks))
+        pair_lookup = {
+            tuple(sorted((row.left_rank, row.right_rank))): row
+            for row in first.pairwise_similarities
+        }
+        best_possible_max_similarity = min(
+            max(pair_lookup[tuple(sorted(pair))].codon_similarity_percent for pair in combinations(ranks, 2))
+            for ranks in combinations(sorted(candidate_ranks), 3)
+        )
+        self.assertEqual(first.recommended_subset.max_codon_similarity_percent, best_possible_max_similarity)
         for candidate in first.candidates:
             self.assertEqual(candidate.analysis.translated_amino_acids, "MSTNPKPQR")
             self.assertTrue(candidate.analysis.translation_matches_input)
             self.assertLessEqual(candidate.difference_from_reference.codon_difference_percent, 20.0)
+            if candidate.rank > 1:
+                self.assertEqual(candidate.source, "kazusa_diverse")
+                self.assertGreaterEqual(candidate.difference_from_reference.codon_difference_percent, 10.0)
             self.assertLessEqual(
                 candidate.codon_preference.avoidable_lowest_count,
                 first.candidates[0].codon_preference.avoidable_lowest_count,

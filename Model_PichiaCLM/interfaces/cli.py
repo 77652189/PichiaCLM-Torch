@@ -64,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate multiple unique synonymous CDS candidates for a single --aa input.",
     )
     parser.add_argument(
+        "--subset-size",
+        type=int,
+        default=5,
+        help="Recommended low-similarity subset size when --num-candidates > 1.",
+    )
+    parser.add_argument(
         "--temperature",
         type=float,
         default=0.8,
@@ -183,6 +189,7 @@ def _run_candidate_prediction(args: argparse.Namespace, predictor: PichiaCLMPred
         num_candidates=args.num_candidates,
         temperature=args.temperature,
         seed=args.seed,
+        subset_size=args.subset_size,
         motifs=args.motif,
         custom_restriction_sites=args.restriction_site,
     )
@@ -210,9 +217,30 @@ def _run_candidate_prediction(args: argparse.Namespace, predictor: PichiaCLMPred
     print(f"Requested candidates: {candidate_set.requested_candidates}")
     print(f"Generated candidates: {candidate_set.generated_candidates}")
     print(f"Sampling attempts: {candidate_set.attempts}")
+    diversity = candidate_set.pairwise_diversity
+    print(
+        "Pairwise codon difference mean/min: "
+        f"{diversity.mean_codon_difference_percent} / {diversity.min_codon_difference_percent}"
+    )
+    if candidate_set.recommended_subset:
+        subset = candidate_set.recommended_subset
+        print(
+            "Recommended low-similarity subset: "
+            f"ranks={','.join(str(rank) for rank in subset.selected_ranks)}; "
+            f"mean/max codon similarity={subset.mean_codon_similarity_percent} / "
+            f"{subset.max_codon_similarity_percent}"
+        )
     if candidate_set.note:
         print(f"Note: {candidate_set.note}")
     print()
+    if candidate_set.pairwise_similarities:
+        print("Pairwise codon similarity:")
+        for row in candidate_set.pairwise_similarities:
+            print(
+                f"  {row.left_rank} vs {row.right_rank}: "
+                f"similarity={row.codon_similarity_percent}%, difference={row.codon_difference_percent}%"
+            )
+        print()
     for candidate in candidate_set.candidates:
         analysis = candidate.analysis
         difference = candidate.difference_from_reference
