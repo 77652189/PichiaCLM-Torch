@@ -12,6 +12,12 @@ import streamlit as st
 
 from Model_PichiaCLM.core.analysis import analyze_cds, load_training_codon_reference
 from Model_PichiaCLM.core.biology import normalize_dna
+from Model_PichiaCLM.core.codon_editor import (
+    build_codon_cells,
+    codon_options_for_amino_acid,
+    replace_selected_codons,
+    search_codon_cells,
+)
 from Model_PichiaCLM.core.config import DEFAULT_WEIGHTS_PATH
 from Model_PichiaCLM.core.fasta import FastaRecord, format_fasta, parse_fasta
 from Model_PichiaCLM.core.fusion import compare_signal_fusion
@@ -130,6 +136,125 @@ def records_to_csv(rows: list[dict[str, object]]) -> str:
     writer.writeheader()
     writer.writerows(rows)
     return handle.getvalue()
+
+
+def codon_display_value(cell: object, display_mode: str) -> str:
+    return cell.rna_codon if display_mode == "RNA" else cell.dna_codon
+
+
+def codon_option_display_value(row: dict[str, object], display_mode: str) -> str:
+    return str(row["rna_codon"] if display_mode == "RNA" else row["codon"])
+
+
+def render_codon_editor_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stButton"] > button {
+            min-height: 2.75rem;
+            white-space: normal;
+            border-radius: 0.55rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            line-height: 1.25;
+            padding-top: 0.55rem;
+            padding-bottom: 0.55rem;
+        }
+        div[data-testid="stButton"] > button[kind="primary"] {
+            border: 2px solid #38bdf8;
+            background: linear-gradient(180deg, #075985 0%, #0c4a6e 100%);
+            box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35), 0 0 14px rgba(56, 189, 248, 0.25);
+            color: #ffffff;
+            font-weight: 700;
+        }
+        div[data-testid="stButton"] > button[kind="secondary"] {
+            border: 1px solid rgba(148, 163, 184, 0.45);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_codon_grid(
+    cells: list[object],
+    display_mode: str,
+    matched_numbers: set[int],
+    selected_numbers: set[int],
+) -> None:
+    st.caption("点击密码子块可选择或取消选择；蓝色高亮表示查找命中或已选择。")
+    columns_per_row = 5
+    version = st.session_state.get("codon_editor_selection_version", 0)
+    for row_start in range(0, len(cells), columns_per_row):
+        columns = st.columns(columns_per_row)
+        for offset, cell in enumerate(cells[row_start : row_start + columns_per_row]):
+            is_selected = cell.codon_number in selected_numbers
+            is_matched = cell.codon_number in matched_numbers
+            if is_selected:
+                status = "已选"
+            elif is_matched:
+                status = "命中"
+            elif not cell.replaceable:
+                status = "不可替换"
+            else:
+                status = "可替换"
+            label = (
+                f"#{cell.codon_number}  {codon_display_value(cell, display_mode)}\n"
+                f"AA {cell.amino_acid} | bp {cell.start}-{cell.end}\n"
+                f"{status}"
+            )
+            clicked = columns[offset].button(
+                label,
+                key=f"codon_editor_cell_{version}_{cell.codon_number}",
+                type="primary" if is_selected or is_matched else "secondary",
+                disabled=not cell.replaceable,
+                use_container_width=True,
+            )
+            if clicked:
+                next_selected = set(selected_numbers)
+                if is_selected:
+                    next_selected.remove(cell.codon_number)
+                else:
+                    next_selected.add(cell.codon_number)
+                st.session_state["codon_editor_selected_codons"] = sorted(next_selected)
+                st.session_state["codon_editor_selection_version"] = version + 1
+                st.rerun()
+
+
+def codon_table_rows(
+    cells: list[object],
+    display_mode: str,
+    matched_numbers: set[int],
+    selected_numbers: set[int],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "选择": cell.codon_number in selected_numbers,
+            "命中": "是" if cell.codon_number in matched_numbers else "",
+            "密码子编号": cell.codon_number,
+            "bp 位置": f"{cell.start}-{cell.end}",
+            "显示密码子": codon_display_value(cell, display_mode),
+            "DNA": cell.dna_codon,
+            "RNA": cell.rna_codon,
+            "氨基酸": cell.amino_acid,
+            "可替换": "是" if cell.replaceable else "",
+            "训练频率": cell.training_fraction,
+            "公开表频率": cell.public_fraction,
+        }
+        for cell in cells
+    ]
+
+
+def replacement_rows(replacements: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            "密码子编号": row["codon_number"],
+            "bp 位置": f"{row['start']}-{row['end']}",
+            "氨基酸": row["amino_acid"],
+            "原密码子": row["old_codon"],
+            "新密码子": row["new_codon"],
+        }
+        for row in replacements
+    ]
 
 
 def predict_direct(
@@ -836,6 +961,205 @@ def render_candidates_tab(settings: dict[str, object]) -> None:
         render_candidate_set_result(result)
 
 
+def render_codon_editor_tab(settings: dict[str, object]) -> None:
+    render_codon_editor_styles()
+    default_cds = "ATGTCCACAAATCCCAAACCACAGAGA"
+    st.session_state.setdefault("codon_editor_active_cds", default_cds)
+    st.session_state.setdefault("codon_editor_selected_codons", [])
+    st.session_state.setdefault("codon_editor_selection_version", 0)
+    st.session_state.setdefault("codon_editor_search_query", "")
+
+    input_col, option_col = st.columns([2, 1])
+    with input_col:
+        raw_cds = st.text_area("粘贴 CDS", value=default_cds, height=140, key="codon_editor_raw_cds")
+        expected_aa = st.text_area("可选：期望翻译得到的 AA", value="", height=95, key="codon_editor_expected_aa")
+    with option_col:
+        show_rna = st.toggle("显示 RNA 写法 U", value=False)
+        display_mode = "RNA" if show_rna else "DNA"
+        st.caption("编辑器内部始终按 DNA/CDS 处理；RNA 显示只用于对照标准密码子表。")
+        if st.button("载入到编辑器", type="primary", key="codon_editor_load"):
+            try:
+                build_codon_cells(raw_cds)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state["codon_editor_active_cds"] = normalize_dna(raw_cds)
+                st.session_state["codon_editor_selected_codons"] = []
+                st.session_state["codon_editor_search_query"] = ""
+                st.session_state["codon_editor_last_result"] = None
+                st.session_state["codon_editor_selection_version"] += 1
+                st.rerun()
+
+    active_cds = st.session_state["codon_editor_active_cds"]
+    try:
+        cells = build_codon_cells(active_cds)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    st.subheader("当前编辑中的 CDS")
+    st.text_area(
+        "当前 CDS",
+        value=active_cds,
+        height=110,
+        disabled=True,
+        key=f"codon_editor_active_cds_display_{st.session_state['codon_editor_selection_version']}",
+    )
+
+    query_col, apply_col = st.columns([3, 1])
+    query = query_col.text_input("查找密码子或氨基酸", value="", placeholder="例如 CCA / UUC / P / Phe")
+    apply_col.write("")
+    apply_col.write("")
+    if apply_col.button("应用查找", type="primary", key="codon_editor_apply_search"):
+        st.session_state["codon_editor_search_query"] = query.strip()
+        st.session_state["codon_editor_selection_version"] += 1
+        st.rerun()
+    typed_query = query.strip()
+    active_query = typed_query or st.session_state.get("codon_editor_search_query", "")
+    matched_numbers = set(search_codon_cells(cells, active_query))
+    selected_numbers = set(st.session_state.get("codon_editor_selected_codons", []))
+
+    metric_a, metric_b, metric_c, metric_d = st.columns(4)
+    metric_a.metric("密码子数量", len(cells))
+    metric_b.metric("命中数量", len(matched_numbers))
+    metric_c.metric("已选择", len(selected_numbers))
+    metric_d.metric("显示模式", display_mode)
+
+    if active_query:
+        if matched_numbers:
+            matched_preview = ", ".join(
+                f"#{cell.codon_number} {codon_display_value(cell, display_mode)}"
+                for cell in cells
+                if cell.codon_number in matched_numbers
+            )
+            st.success(f"当前查找：{active_query}，命中 {len(matched_numbers)} 个：{matched_preview}")
+        else:
+            st.warning(f"当前查找：{active_query}，没有命中。")
+    elif query.strip():
+        st.info("输入查找内容后，点击“应用查找”刷新高亮。")
+
+    select_col, clear_col = st.columns(2)
+    if select_col.button("全选当前命中", disabled=not matched_numbers, key="codon_editor_select_matches"):
+        st.session_state["codon_editor_selected_codons"] = sorted(selected_numbers | matched_numbers)
+        st.session_state["codon_editor_selection_version"] += 1
+        st.rerun()
+    if clear_col.button("清空选择", disabled=not selected_numbers, key="codon_editor_clear_selection"):
+        st.session_state["codon_editor_selected_codons"] = []
+        st.session_state["codon_editor_selection_version"] += 1
+        st.rerun()
+
+    render_codon_grid(cells, display_mode, matched_numbers, selected_numbers)
+
+    rows = codon_table_rows(cells, display_mode, matched_numbers, selected_numbers)
+    with st.expander("详细表格：逐个勾选密码子", expanded=False):
+        edited_rows = st.data_editor(
+            rows,
+            use_container_width=True,
+            hide_index=True,
+            key=f"codon_editor_table_{st.session_state['codon_editor_selection_version']}_{len(cells)}",
+            disabled=[column for column in rows[0] if column != "选择"] if rows else True,
+            column_config={
+                "选择": st.column_config.CheckboxColumn("选择"),
+            },
+        )
+    selected_numbers = {
+        int(row["密码子编号"])
+        for row in edited_rows
+        if row.get("选择")
+    }
+    st.session_state["codon_editor_selected_codons"] = sorted(selected_numbers)
+
+    selected_cells = [
+        cell for cell in cells
+        if cell.codon_number in selected_numbers
+    ]
+    selected_amino_acids = sorted({cell.amino_acid for cell in selected_cells})
+
+    st.subheader("同义密码子替换")
+    if not selected_cells:
+        st.info("请先查找并选择至少一个密码子。")
+    elif len(selected_amino_acids) > 1:
+        st.warning("当前选择包含多个氨基酸，请一次只替换同一种氨基酸对应的密码子。")
+    else:
+        amino_acid = selected_amino_acids[0]
+        options = codon_options_for_amino_acid(amino_acid)
+        if amino_acid == "*" or len(options) <= 1:
+            st.warning(f"{amino_acid} 没有可替换的同义密码子。")
+        else:
+            option_labels = {
+                (
+                    f"{codon_option_display_value(row, display_mode)} "
+                    f"| 训练频率 {value_or_dash(row['training_fraction'])} "
+                    f"| 公开表频率 {value_or_dash(row['public_fraction'])}"
+                ): row["codon"]
+                for row in options
+            }
+            target_label = st.selectbox(
+                "目标同义密码子",
+                list(option_labels),
+                key=f"codon_editor_target_codon_{display_mode}_{amino_acid}",
+            )
+            target_display = target_label.split(" | ", maxsplit=1)[0]
+            st.caption(f"将 {len(selected_cells)} 个 {amino_acid} 密码子替换为 {target_display}。")
+            if st.button("确认替换选中密码子", type="primary", key="codon_editor_replace"):
+                try:
+                    edit_result = replace_selected_codons(
+                        active_cds,
+                        selected_numbers,
+                        option_labels[target_label],
+                        expected_amino_acids=expected_aa or None,
+                    )
+                    analysis = analyze_cds(
+                        edit_result.edited_cds,
+                        amino_acids=edit_result.expected_amino_acids,
+                        motifs=settings["motifs"],
+                        custom_restriction_sites=settings["custom_sites"],
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state["codon_editor_active_cds"] = edit_result.edited_cds
+                    st.session_state["codon_editor_selected_codons"] = []
+                    st.session_state["codon_editor_selection_version"] += 1
+                    st.session_state["codon_editor_last_result"] = {
+                        "edit": asdict(edit_result),
+                        "analysis": asdict(analysis),
+                    }
+                    st.rerun()
+
+    last_result = st.session_state.get("codon_editor_last_result")
+    if last_result:
+        edit = last_result["edit"]
+        st.subheader("替换后结果")
+        st.success("翻译保持一致" if edit["translation_preserved"] else "翻译未保持一致")
+        rows = replacement_rows(edit["replacements"])
+        dataframe_or_success("替换记录", rows, empty_text="没有实际替换")
+        download_col_a, download_col_b = st.columns(2)
+        download_col_a.download_button(
+            "下载替换后 CDS FASTA",
+            data=f">PichiaCLM_codon_edited\n{edit['edited_cds']}\n",
+            file_name="pichiaclm_codon_edited.fasta",
+            mime="text/plain",
+            key="codon_editor_fasta_download",
+        )
+        download_col_b.download_button(
+            "下载替换记录 CSV",
+            data=records_to_csv(rows),
+            file_name="pichiaclm_codon_replacements.csv",
+            mime="text/csv",
+            key="codon_editor_csv_download",
+        )
+        render_cds_analysis_result(
+            {
+                "cds": edit["edited_cds"],
+                "translated_amino_acids": edit["translated_amino_acids"],
+                "analysis": last_result["analysis"],
+            },
+            title="替换后基础质检",
+            key_prefix="codon_editor_result",
+        )
+
+
 def render_batch_tab(settings: dict[str, object]) -> None:
     uploaded = st.file_uploader("上传 AA FASTA 文件", type=["fa", "fasta", "faa", "txt"])
     raw_fasta = st.text_area("或粘贴 AA FASTA", value="", height=180)
@@ -1019,8 +1343,8 @@ def main() -> None:
     st.set_page_config(page_title="PichiaCLM", page_icon="DNA", layout="wide")
     st.title("PichiaCLM 氨基酸序列转 CDS")
     settings = sidebar_settings()
-    tab_single, tab_candidates, tab_batch, tab_external, tab_fusion = st.tabs(
-        ["单条预测", "多候选 CDS", "FASTA 批量", "二次优化 CDS 质检", "信号肽拼接"]
+    tab_single, tab_candidates, tab_batch, tab_external, tab_editor, tab_fusion = st.tabs(
+        ["单条预测", "多候选 CDS", "FASTA 批量", "二次优化 CDS 质检", "密码子编辑器", "信号肽拼接"]
     )
     with tab_single:
         render_single_tab(settings)
@@ -1030,6 +1354,8 @@ def main() -> None:
         render_batch_tab(settings)
     with tab_external:
         render_external_cds_tab(settings)
+    with tab_editor:
+        render_codon_editor_tab(settings)
     with tab_fusion:
         render_fusion_tab(settings)
 

@@ -13,6 +13,14 @@ from .candidates import (
     generate_cds_candidates,
     select_low_similarity_subset,
 )
+from .codon_editor import (
+    CodonCell,
+    CodonEditResult,
+    CodonReplacement,
+    build_codon_cells,
+    replace_selected_codons,
+    search_codon_cells,
+)
 from .fasta import FastaRecord, format_fasta, parse_fasta
 from .fusion import FusionComparison, compare_signal_fusion
 from .postprocess import PostprocessResult, conservative_postprocess
@@ -25,6 +33,9 @@ __all__ = [
     "CandidateGenerationOptions",
     "CandidateSet",
     "CandidateSubsetSelection",
+    "CodonCell",
+    "CodonEditResult",
+    "CodonReplacement",
     "CdsCandidate",
     "FusionComparison",
     "PichiaCLMPredictor",
@@ -35,13 +46,16 @@ __all__ = [
     "TranslationCheck",
     "analyze_cds",
     "batch_predict",
+    "build_codon_cells",
     "check_translation",
     "compare_signal_fusion",
     "conservative_postprocess",
     "format_fasta",
     "generate_cds_candidates",
     "parse_fasta",
+    "replace_selected_codons",
     "scan_restriction_sites",
+    "search_codon_cells",
     "select_low_similarity_subset",
     "translate_cds",
 ]

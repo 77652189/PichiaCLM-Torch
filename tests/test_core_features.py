@@ -13,6 +13,11 @@ from Model_PichiaCLM.core.candidates import (
     compare_cds,
     generate_cds_candidates,
 )
+from Model_PichiaCLM.core.codon_editor import (
+    build_codon_cells,
+    replace_selected_codons,
+    search_codon_cells,
+)
 from Model_PichiaCLM.core.fasta import FastaRecord, format_fasta, parse_fasta
 from Model_PichiaCLM.core.fusion import compare_signal_fusion
 from Model_PichiaCLM.core.postprocess import conservative_postprocess
@@ -38,6 +43,57 @@ class CoreBiologyTests(unittest.TestCase):
         self.assertFalse(invalid.length_multiple_of_three)
         self.assertEqual(invalid.internal_stop_codons, [2])
         self.assertFalse(invalid.translation_matches_input)
+
+
+class CodonEditorTests(unittest.TestCase):
+    def test_build_codon_cells_tracks_order_and_positions(self) -> None:
+        cells = build_codon_cells("ATGTCCACAAATCCCAAACCACAGAGA")
+
+        self.assertEqual(len(cells), 9)
+        self.assertEqual(cells[0].codon_number, 1)
+        self.assertEqual(cells[0].start, 1)
+        self.assertEqual(cells[0].end, 3)
+        self.assertEqual(cells[0].dna_codon, "ATG")
+        self.assertEqual(cells[0].rna_codon, "AUG")
+        self.assertEqual(cells[0].amino_acid, "M")
+        self.assertFalse(cells[0].replaceable)
+        self.assertEqual(cells[-1].codon_number, 9)
+        self.assertEqual(cells[-1].start, 25)
+        self.assertEqual(cells[-1].end, 27)
+        self.assertEqual(cells[-1].dna_codon, "AGA")
+
+    def test_search_accepts_rna_codon_and_amino_acid_query(self) -> None:
+        cells = build_codon_cells("TTCTTTCCACCACCT")
+
+        self.assertEqual(search_codon_cells(cells, "UUC"), [1])
+        self.assertEqual(search_codon_cells(cells, "CCA"), [3, 4])
+        self.assertEqual(search_codon_cells(cells, "P"), [3, 4, 5])
+        self.assertEqual(search_codon_cells(cells, "Phe"), [1, 2])
+
+    def test_replace_selected_codons_preserves_translation_and_analysis(self) -> None:
+        result = replace_selected_codons("CCACCACCT", [1, 2], "CCT", expected_amino_acids="PPP")
+
+        self.assertEqual(result.edited_cds, "CCTCCTCCT")
+        self.assertTrue(result.translation_preserved)
+        self.assertEqual(len(result.replacements), 2)
+        report = analyze_cds(result.edited_cds, amino_acids="PPP")
+        self.assertTrue(report.translation_matches_input)
+
+    def test_replace_selected_codons_rejects_non_synonymous_target(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not selected amino acid"):
+            replace_selected_codons("CCACCACCT", [1, 2], "TTC", expected_amino_acids="PPP")
+
+    def test_replace_selected_codons_rejects_mixed_amino_acid_selection(self) -> None:
+        with self.assertRaisesRegex(ValueError, "different amino acids"):
+            replace_selected_codons("CCATTC", [1, 2], "CCT")
+
+    def test_single_codon_amino_acids_are_not_replaceable(self) -> None:
+        cells = build_codon_cells("ATGTGG")
+
+        self.assertFalse(cells[0].replaceable)
+        self.assertFalse(cells[1].replaceable)
+        with self.assertRaisesRegex(ValueError, "no replaceable"):
+            replace_selected_codons("ATGTGG", [1], "ATG")
 
 
 class FastaTests(unittest.TestCase):
