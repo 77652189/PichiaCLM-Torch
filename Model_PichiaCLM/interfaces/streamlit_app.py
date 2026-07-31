@@ -1340,7 +1340,11 @@ def render_fusion_tab(settings: dict[str, object]) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="PichiaCLM", page_icon="DNA", layout="wide")
+    st.set_page_config(
+        page_title="PichiaCLM",
+        page_icon=r"C:\Users\63097\Documents\LauncherIcons\pichiaclm_8501.png",
+        layout="wide",
+    )
     st.title("PichiaCLM 氨基酸序列转 CDS")
     settings = sidebar_settings()
     tab_single, tab_candidates, tab_batch, tab_external, tab_editor, tab_fusion = st.tabs(

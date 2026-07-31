@@ -106,7 +106,7 @@ if ($existingPid) {
     exit 1
 }
 
-if (-not (Test-FirewallRuleReady)) {
+if ($env:CODEX_AUTORESTORE_SKIP_FIREWALL -ne "1" -and -not (Test-FirewallRuleReady)) {
     Ensure-FirewallRule
 }
 
