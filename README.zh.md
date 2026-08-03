@@ -1,76 +1,107 @@
-# PichiaCLM
+# PichiaCLM 密码子设计与可构建候选
 
-[English](README.md) · [中文](README.zh.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
+[English](README.md) · [中文](README.zh.md)
 
-> **面向毕赤酵母表达构建的密码子设计工作台。** 它把蛋白序列转为可审查的同义 CDS 候选；不承诺表达量或湿实验成功。
+> 把一条蛋白序列变成若干条**彼此互不相同**的同义 CDS 候选，
+> 每条都过序列层面的构建风险筛查，且在关键指标上都不许比基准更差。
 
-## 为什么重要
+"彼此互不相同"是整件事的要害。一个返回五条、实际上是同一条序列的生成器，
+返回的是**一条**候选——湿实验没法拿它当五个构建体去跑。
 
-构建设计不应只交付一个无法解释的“最优”DNA 序列。PichiaCLM 保留候选、序列质量证据和人工判断，让团队在订购 DNA 前看清取舍。
+---
 
-## 面试展示亮点
+## 贡献边界
 
-| 工程判断 | 价值 |
+本仓库 fork 自
+[owen-min/PichiaCLM-Torch](https://github.com/owen-min/PichiaCLM-Torch)。
+
+**模型的 Keras → PyTorch 移植不是我做的。** 那是上游基线，提交 `b6fea1b`。
+我的贡献是它之后的全部：序列安全校验、带约束的多候选生成、两两互异的子集选择、
+密码子编辑器，以及三个共用同一核心的入口。`git log` 里这条分界线是直接可查的。
+
+## 模型
+
+不是 Transformer——是**多任务 GRU Seq2Seq + 缩放点积注意力**
+（[`core/model.py`](Model_PichiaCLM/core/model.py)）：
+
+- 在氨基酸序列上做双向 GRU 编码
+- 一个 GRU 解码器输出密码子，另一个 GRU 解码器把氨基酸序列重建出来作为辅助任务——
+  这个重建头的作用是把密码子头**拴在**它本该编码的那条蛋白上
+- 解码状态与编码输出之间做缩放点积注意力（`dot_product_attention`）
+
+权重随仓库分发（约 37 MB），推理在 CPU 上跑。不需要 GPU，不需要下载步骤。
+
+## 方法：一条候选怎样才算合格
+
+采样同义密码子很容易。难的是让候选**实验室真能构建**。
+
+**① 带约束的解码。** 解码时做掩码，只允许输出与目标残基同义的密码子。
+于是"翻译回去还是同一条蛋白"是结构上保证的，
+而不是事后再检查一遍、然后祈祷它通过。
+
+**② 序列安全校验**（[`core/analysis.py`](Model_PichiaCLM/core/analysis.py)）。
+每条候选都要过一遍真正会让合成与克隆失败的那些模式——
+而不是那些在指标上好看的模式：
+
+| 检查项 | 为什么要有 |
 | --- | --- |
-| 输出多个候选，而非黑盒唯一答案 | 序列取舍可复核 |
-| 双 CAI 与规则质控 | 区分密码子偏好证据与翻译、GC、重复、motif、同聚碱基、酶切位点风险 |
-| CLI、HTTP、Streamlit 共用核心 | 自动化与人工流程结果一致 |
-| 保守的候选判定 | 候选只服务审查，不被包装为分泌、产量或实验成功证明 |
+| `LocalGCWindow` | 全局 GC 正常时，局部 GC 极端照样让合成失败 |
+| `HomopolymerRun` | 单碱基长串导致聚合酶打滑 |
+| `TandemRepeat` · `RepeatedKmer` | 重复序列导致组装错位 |
+| `MotifHit` | 非预期的限制性酶切位点与调控元件 |
+| `CAIComparison` | 密码子适应度，对着**两套**参照系各算一遍 |
 
-## 工作流
+**③ 两套参照系，而且都不当闸门。** CAI 同时对训练集密码子频率和公开 Kazusa 频率各算一次。
+两者会不一致——而这个不一致本身就是信息，
+所以两个值并排列在候选旁边，谁都不是通过/不通过的阈值
+（[ADR-0001](docs/adr/ADR-0001-qualified-candidate-acceptance.md)）。
+只设一个 CAI 阈值会简单得多，代价是把"这个判决出自哪套参照系"藏起来了。
 
-```mermaid
-flowchart LR
-  A[蛋白序列] --> B[同义 CDS 候选]
-  B --> C[翻译与序列质控]
-  C --> D[CAI 与风险证据]
-  D --> E[人工审查]
-  E --> F[导出 FASTA CSV JSON]
-```
+**④ 合格是相对基准的，不是绝对的。** 一条新候选被接受，必须同时满足：
+翻译回同一条蛋白、没有关键质量问题、风险警告数**不高于**基准、
+可避免的最低偏好密码子数**不高于**基准。
+CAI 更高的候选照样可能被拒——
+用增加的风险去换一个更好看的分数，正是这条规则要挡住的交易。
 
-## 架构边界
+**⑤ 多样性是选出来的，不是指望出来的**
+（[`core/candidates.py`](Model_PichiaCLM/core/candidates.py)）。
+`PairwiseDiversity` 度量候选之间在碱基与密码子层面差多远，
+`CandidateSubsetSelection` 挑出相互差异最大的那个子集。
+设计空间耗尽时，`CandidateSet.exhausted` 置位，**返回的候选就是少于请求数**——
+唯一绝对不能做的，是拿近似重复的序列把数量凑满。
 
-```mermaid
-flowchart TB
-  UI[CLI · FastAPI · Streamlit] --> CORE[候选与质控核心]
-  CORE --> MODEL[PyTorch 序列模型]
-  CORE --> RULES[生物与序列规则]
-  CORE --> OUT[可审查导出]
-  OUT --> HUMAN[研究人员决策]
-```
-
-接口只能传递和展示结果，不能重定义候选合格规则；CAI 是审查证据，不是独立放行阈值。
+最后这条最值得在评审里守住：请求 5 条返回 3 条，是一个看得见、可以补救的失望；
+返回 5 条、其实只有 3 条，会在任何人察觉之前先烧掉几周湿实验。
 
 ## 快速开始
 
 ```powershell
-pip install -r requirements.txt
 python -m streamlit run Model_PichiaCLM/interfaces/streamlit_app.py
 ```
 
-API 可使用 `uvicorn Model_PichiaCLM.interfaces.api:app --host 0.0.0.0 --port 8000` 启动。FASTA、CSV、JSON 导出物仍须人工复核。
+三个入口共用同一个核心——Streamlit、CLI（[`interfaces/cli.py`](Model_PichiaCLM/interfaces/cli.py)）、
+HTTP API（[`interfaces/api.py`](Model_PichiaCLM/interfaces/api.py)）。
+ADR-0001 要求三者呈现同一份生成结果与质量判定，
+所以一条候选不可能在一个入口显示合格、在另一个入口显示不合格。
 
-## 工程证据
+## 边界
 
-| 主张 | 验证方式 | 护栏 |
-| --- | --- | --- |
-| 候选与质控行为 | `python -m pytest -q tests/test_core_features.py` | 无效输入与关键序列风险显式呈现 |
-| 文档边界 | `python -m pytest -q tests/test_docs_governance.py` | 产品主张与当前状态分离 |
+- **不预测产量。** 候选筛的是构建风险，不是表达水平。
+  通过筛查不等于对实验成功的预测。
+- **移植部分是上游工作** —— 见[贡献边界](#贡献边界)。
+- **密码子偏好统计是描述性的**，供人比较，不作阈值。
+- **候选数少于请求数是合法结果**，并且会被明确报告。
 
-## 权威文档
+## 文档
 
-| 文档 | 用途 |
+| 文档 | 什么时候改 |
 | --- | --- |
-| [需求](docs/REQUIREMENTS.md) | 范围、非目标、验收 |
-| [架构](docs/ARCHITECTURE.md) | 分层边界与不变量 |
-| [执行计划](docs/EXECUTION_PLAN.md) | 当前授权与阶段门禁 |
-| [交接](docs/HANDOFF.md) | 当前切片与聚焦验证 |
-| [ADR 索引](docs/adr/README.md) | 长期设计取舍 |
+| [需求](docs/REQUIREMENTS.md) | 目标或能力边界变了 |
+| [架构](docs/ARCHITECTURE.md) | 实现结构变了 |
+| [执行计划](docs/EXECUTION_PLAN.md) | 进度推进了——状态的唯一权威 |
+| [handoff](docs/HANDOFF.md) | 当前切片换了 |
+| [ADR 索引](docs/adr/README.md) | 从不改——决策只被取代，不被改写 |
 
-<details>
-<summary>技术追问：为什么不只优化 CAI？</summary>
+---
 
-CAI 是有用的比较证据，却不能覆盖全部序列风险，更不能证明表达。PichiaCLM 因而把翻译正确性和序列质量规则放在判定路径中，并同时展示训练数据与公开参考的 CAI。
-</details>
-
-> **项目思考：** 好的序列设计，是在昂贵实验开始前让不确定性可被检查。更多项目见[个人网站](https://77652189.github.io)。
+> 更多项目见[个人网站](https://77652189.github.io)。
