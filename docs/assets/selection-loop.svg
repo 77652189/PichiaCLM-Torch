@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400" width="700" height="400" role="img" aria-labelledby="t d">
+<title id="t">Candidate loop: diversity drives ordering, acceptability decides admission</title>
+<desc id="d">The model output stays in the set as candidate one. Each pass takes the draft least similar to those already selected, then filters it on three criteria relative to the baseline. When drafts run out the set is returned short with the reason stated, never padded with near-duplicates.</desc>
+<defs><marker id="a" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" class="arh"/></marker>
+<marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" class="arr"/></marker></defs>
+<style>
+  .bg{fill:#ffffff}
+  .box{fill:#f4f2ec;stroke:#d8d5cc;stroke-width:1}
+  .ok{fill:#e1f5ee;stroke:#0F766E;stroke-width:1.5}
+  .rej{fill:#f1efe8;stroke:#b4b2a9;stroke-width:1.2}
+  .ex{fill:none;stroke:#BA7517;stroke-width:1.5;stroke-dasharray:6 4}
+  .fl{stroke:#8b8b85;stroke-width:1.6;fill:none}
+  .fx{stroke:#b4b2a9;stroke-width:1.4;fill:none}
+  .lp{stroke:#0F766E;stroke-width:1.6;fill:none}
+  .arh{fill:#8b8b85} .arr{fill:#0F766E}
+  .ti{fill:#2c2c2a;font:500 15px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .sim{fill:#8b8b85;font:400 11px system-ui,-apple-system,'Segoe UI',sans-serif;font-style:italic}
+  .h{fill:#2c2c2a;font:500 13px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .hok{fill:#0b5c4f;font:500 13px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .s{fill:#5f5e5a;font:400 11.5px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .lbok{fill:#0F766E;font:500 11.5px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .warn{fill:#8a5a00;font:500 12.5px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .note{fill:#5f5e5a;font:400 11.5px system-ui,-apple-system,'Segoe UI',sans-serif}
+  @media (prefers-color-scheme:dark){
+    .bg{fill:#0d1117} .box{fill:#1c1f26;stroke:#3a3d44} .ok{fill:#0d2e28;stroke:#2fa88f}
+    .rej{fill:#1a1a1e;stroke:#5f5e5a} .ex{stroke:#EF9F27}
+    .fl{stroke:#8b8b85} .fx{stroke:#5f5e5a} .lp{stroke:#2fa88f}
+    .arh{fill:#8b8b85} .arr{fill:#2fa88f}
+    .ti{fill:#e8e6e0} .sim{fill:#8b8b85} .h{fill:#e8e6e0} .hok{fill:#7fd9c2}
+    .s{fill:#b4b2a9} .lbok{fill:#5DCAA5} .warn{fill:#EF9F27} .note{fill:#b4b2a9}
+  }
+</style>
+<rect class="bg" x="0" y="0" width="700" height="400"/>
+<text class="ti" x="20" y="26">Diversity drives ordering; acceptability decides admission</text>
+<text class="sim" x="20" y="44">Verified against core/candidates.py::generate_cds_candidates</text>
+
+<rect class="box" x="30" y="62" width="235" height="44" rx="6"/>
+<text class="h" x="147" y="82" text-anchor="middle">baseline = the model's own output</text>
+<text class="s" x="147" y="98" text-anchor="middle">round-trip checked first, or it raises</text>
+<path class="fl" d="M 269 84 H 315" marker-end="url(#a)"/>
+<rect class="ok" x="321" y="62" width="252" height="44" rx="6"/>
+<text class="hok" x="447" y="82" text-anchor="middle">baseline stays in — candidate #1</text>
+<text class="s" x="447" y="98" text-anchor="middle">an anchor inside the set, not an external ruler</text>
+
+<rect class="box" x="60" y="152" width="228" height="48" rx="6"/>
+<text class="h" x="174" y="172" text-anchor="middle">take the draft least like those chosen</text>
+<text class="s" x="174" y="190" text-anchor="middle">diversity acts only here</text>
+<path class="fl" d="M 292 176 H 336" marker-end="url(#a)"/>
+
+<rect class="box" x="342" y="152" width="130" height="48" rx="6"/>
+<text class="h" x="407" y="181" text-anchor="middle">acceptability</text>
+
+<path class="fx" d="M 476 176 H 514" marker-end="url(#a)"/>
+<rect class="rej" x="518" y="140" width="158" height="74" rx="6"/>
+<text class="s" x="530" y="160">critical quality issue</text>
+<text class="s" x="530" y="180">warnings &gt; baseline</text>
+<text class="s" x="530" y="200">avoidable lowest &gt; baseline</text>
+<text class="s" x="530" y="228">any one of these — discard</text>
+
+<path class="lp" d="M 407 204 V 240 H 174 V 204" marker-end="url(#ar)"/>
+<text class="lbok" x="290" y="256" text-anchor="middle">passes — admit, then continue</text>
+
+<rect class="ex" x="60" y="288" width="575" height="58" rx="6"/>
+<text class="warn" x="78" y="312">drafts exhausted → return fewer, stating requested / generated / attempts</text>
+<text class="note" x="78" y="334">The loop never relaxes. Padding to the requested count is the failure this design exists to prevent.</text>
+
+<text class="note" x="20" y="376">Reverse the order — filter first, then diversify — and there is nothing left to diversify over.</text>
+</svg>

@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400" width="700" height="400" role="img" aria-labelledby="t d">
+<title id="t">候选生成循环：多样性决定顺序，可接受性决定准入</title>
+<desc id="d">模型输出作为基准留在候选集中作为第一条。循环每次取与已选集合最不相似的草稿，再以三条相对基准的判据过滤；草稿用尽时返回更少的候选并写明原因，不用近重复凑数。</desc>
+<defs><marker id="a" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" class="arh"/></marker>
+<marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" class="arr"/></marker></defs>
+<style>
+  .bg{fill:#ffffff}
+  .box{fill:#f4f2ec;stroke:#d8d5cc;stroke-width:1}
+  .ok{fill:#e1f5ee;stroke:#0F766E;stroke-width:1.5}
+  .rej{fill:#f1efe8;stroke:#b4b2a9;stroke-width:1.2}
+  .ex{fill:none;stroke:#BA7517;stroke-width:1.5;stroke-dasharray:6 4}
+  .fl{stroke:#8b8b85;stroke-width:1.6;fill:none}
+  .fx{stroke:#b4b2a9;stroke-width:1.4;fill:none}
+  .lp{stroke:#0F766E;stroke-width:1.6;fill:none}
+  .arh{fill:#8b8b85} .arr{fill:#0F766E}
+  .ti{fill:#2c2c2a;font:500 15px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .sim{fill:#8b8b85;font:400 11px system-ui,-apple-system,'Segoe UI',sans-serif;font-style:italic}
+  .h{fill:#2c2c2a;font:500 13px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .hok{fill:#0b5c4f;font:500 13px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .s{fill:#5f5e5a;font:400 11.5px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .lbok{fill:#0F766E;font:500 11.5px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .warn{fill:#8a5a00;font:500 12.5px system-ui,-apple-system,'Segoe UI',sans-serif}
+  .note{fill:#5f5e5a;font:400 11.5px system-ui,-apple-system,'Segoe UI',sans-serif}
+  @media (prefers-color-scheme:dark){
+    .bg{fill:#0d1117} .box{fill:#1c1f26;stroke:#3a3d44} .ok{fill:#0d2e28;stroke:#2fa88f}
+    .rej{fill:#1a1a1e;stroke:#5f5e5a} .ex{stroke:#EF9F27}
+    .fl{stroke:#8b8b85} .fx{stroke:#5f5e5a} .lp{stroke:#2fa88f}
+    .arh{fill:#8b8b85} .arr{fill:#2fa88f}
+    .ti{fill:#e8e6e0} .sim{fill:#8b8b85} .h{fill:#e8e6e0} .hok{fill:#7fd9c2}
+    .s{fill:#b4b2a9} .lbok{fill:#5DCAA5} .warn{fill:#EF9F27} .note{fill:#b4b2a9}
+  }
+</style>
+<rect class="bg" x="0" y="0" width="700" height="400"/>
+<text class="ti" x="20" y="26">多样性决定取的顺序，可接受性决定收不收</text>
+<text class="sim" x="20" y="44">机制按 core/candidates.py::generate_cds_candidates 核实</text>
+
+<rect class="box" x="30" y="62" width="230" height="44" rx="6"/>
+<text class="h" x="145" y="82" text-anchor="middle">基准 = 模型自己的输出</text>
+<text class="s" x="145" y="98" text-anchor="middle">先查回译一致，不过直接抛错</text>
+<path class="fl" d="M 264 84 H 316" marker-end="url(#a)"/>
+<rect class="ok" x="322" y="62" width="250" height="44" rx="6"/>
+<text class="hok" x="447" y="82" text-anchor="middle">基准留在集合里 = 候选 #1</text>
+<text class="s" x="447" y="98" text-anchor="middle">它是参照锚点，不是外部标尺</text>
+
+<rect class="box" x="70" y="152" width="215" height="48" rx="6"/>
+<text class="h" x="177" y="172" text-anchor="middle">取与已选集合最不相似的草稿</text>
+<text class="s" x="177" y="190" text-anchor="middle">多样性只作用于这一步</text>
+<path class="fl" d="M 289 176 H 337" marker-end="url(#a)"/>
+
+<rect class="box" x="343" y="152" width="130" height="48" rx="6"/>
+<text class="h" x="408" y="181" text-anchor="middle">可接受性判定</text>
+
+<path class="fx" d="M 477 176 H 517" marker-end="url(#a)"/>
+<rect class="rej" x="521" y="140" width="152" height="74" rx="6"/>
+<text class="s" x="533" y="160">有关键质量问题</text>
+<text class="s" x="533" y="180">警告数 &gt; 基准</text>
+<text class="s" x="533" y="200">可避免最低偏好 &gt; 基准</text>
+<text class="s" x="533" y="228">任一命中即丢弃</text>
+
+<path class="lp" d="M 408 204 V 240 H 177 V 204" marker-end="url(#ar)"/>
+<text class="lbok" x="292" y="256" text-anchor="middle">通过则收入，继续下一条</text>
+
+<rect class="ex" x="70" y="288" width="560" height="58" rx="6"/>
+<text class="warn" x="88" y="312">草稿用尽 → exhausted：返回更少的候选，并写明请求数 / 实际数 / 尝试次数</text>
+<text class="note" x="88" y="334">循环永不放宽判据。用近重复凑满数量，正是这套设计要避免的那件事。</text>
+
+<text class="note" x="20" y="376">顺序反过来——先过滤再挑多样的——会在一个已经被筛小的池子里挑，多样性无从谈起。</text>
+</svg>

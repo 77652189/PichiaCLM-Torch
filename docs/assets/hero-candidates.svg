@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 250" width="1000" height="250" role="img" aria-labelledby="t d">
+<title id="t">PichiaCLM</title>
+<desc id="d">One amino-acid sequence fans out into four codon sequences whose patterns visibly differ from one another. The first carries a heavier outline, marking the model baseline that stays in the candidate set as the comparison anchor.</desc>
+<style>
+  .bg{fill:#ffffff}
+  .aa{fill:#d8d5cc;stroke:#b4b2a9;stroke-width:1}
+  .fan{stroke:#c4c2ba;stroke-width:1.4;fill:none}
+  .base{fill:none;stroke:#0F766E;stroke-width:2}
+  .c1{fill:#0F766E}
+  .c2{fill:#5DCAA5}
+  .c3{fill:#9FE1CB}
+  @media (prefers-color-scheme:dark){
+    .bg{fill:#0d1117}
+    .aa{fill:#2e3138;stroke:#4a4a46}
+    .fan{stroke:#4a4a46}
+    .base{stroke:#2fa88f}
+    .c1{fill:#2fa88f}
+    .c2{fill:#1d7a68}
+    .c3{fill:#14554a}
+  }
+</style>
+<rect class="bg" x="0" y="0" width="1000" height="250"/>
+
+<g>
+  <rect class="aa" x="60" y="105" width="26" height="40" rx="4"/>
+  <rect class="aa" x="92" y="105" width="26" height="40" rx="4"/>
+  <rect class="aa" x="124" y="105" width="26" height="40" rx="4"/>
+  <rect class="aa" x="156" y="105" width="26" height="40" rx="4"/>
+  <rect class="aa" x="188" y="105" width="26" height="40" rx="4"/>
+  <rect class="aa" x="220" y="105" width="26" height="40" rx="4"/>
+  <rect class="aa" x="252" y="105" width="26" height="40" rx="4"/>
+  <rect class="aa" x="284" y="105" width="26" height="40" rx="4"/>
+  <rect class="aa" x="316" y="105" width="26" height="40" rx="4"/>
+  <rect class="aa" x="348" y="105" width="26" height="40" rx="4"/>
+</g>
+
+<path class="fan" d="M 392 125 L 500 65"/>
+<path class="fan" d="M 392 125 L 500 105"/>
+<path class="fan" d="M 392 125 L 500 145"/>
+<path class="fan" d="M 392 125 L 500 185"/>
+
+<g>
+  <rect class="c1" x="510" y="50" width="32" height="30" rx="3"/><rect class="c2" x="546" y="50" width="32" height="30" rx="3"/><rect class="c1" x="582" y="50" width="32" height="30" rx="3"/><rect class="c3" x="618" y="50" width="32" height="30" rx="3"/><rect class="c2" x="654" y="50" width="32" height="30" rx="3"/><rect class="c1" x="690" y="50" width="32" height="30" rx="3"/><rect class="c1" x="726" y="50" width="32" height="30" rx="3"/><rect class="c2" x="762" y="50" width="32" height="30" rx="3"/><rect class="c3" x="798" y="50" width="32" height="30" rx="3"/><rect class="c1" x="834" y="50" width="32" height="30" rx="3"/><rect class="c2" x="870" y="50" width="32" height="30" rx="3"/><rect class="c1" x="906" y="50" width="32" height="30" rx="3"/>
+  <rect class="base" x="505" y="45" width="438" height="40" rx="5"/>
+</g>
+
+<g>
+  <rect class="c2" x="510" y="96" width="32" height="30" rx="3"/><rect class="c1" x="546" y="96" width="32" height="30" rx="3"/><rect class="c3" x="582" y="96" width="32" height="30" rx="3"/><rect class="c1" x="618" y="96" width="32" height="30" rx="3"/><rect class="c2" x="654" y="96" width="32" height="30" rx="3"/><rect class="c3" x="690" y="96" width="32" height="30" rx="3"/><rect class="c1" x="726" y="96" width="32" height="30" rx="3"/><rect class="c1" x="762" y="96" width="32" height="30" rx="3"/><rect class="c2" x="798" y="96" width="32" height="30" rx="3"/><rect class="c2" x="834" y="96" width="32" height="30" rx="3"/><rect class="c1" x="870" y="96" width="32" height="30" rx="3"/><rect class="c3" x="906" y="96" width="32" height="30" rx="3"/>
+</g>
+
+<g>
+  <rect class="c1" x="510" y="142" width="32" height="30" rx="3"/><rect class="c3" x="546" y="142" width="32" height="30" rx="3"/><rect class="c2" x="582" y="142" width="32" height="30" rx="3"/><rect class="c2" x="618" y="142" width="32" height="30" rx="3"/><rect class="c1" x="654" y="142" width="32" height="30" rx="3"/><rect class="c1" x="690" y="142" width="32" height="30" rx="3"/><rect class="c3" x="726" y="142" width="32" height="30" rx="3"/><rect class="c2" x="762" y="142" width="32" height="30" rx="3"/><rect class="c1" x="798" y="142" width="32" height="30" rx="3"/><rect class="c3" x="834" y="142" width="32" height="30" rx="3"/><rect class="c2" x="870" y="142" width="32" height="30" rx="3"/><rect class="c1" x="906" y="142" width="32" height="30" rx="3"/>
+</g>
+
+<g>
+  <rect class="c3" x="510" y="188" width="32" height="30" rx="3"/><rect class="c2" x="546" y="188" width="32" height="30" rx="3"/><rect class="c1" x="582" y="188" width="32" height="30" rx="3"/><rect class="c2" x="618" y="188" width="32" height="30" rx="3"/><rect class="c3" x="654" y="188" width="32" height="30" rx="3"/><rect class="c2" x="690" y="188" width="32" height="30" rx="3"/><rect class="c1" x="726" y="188" width="32" height="30" rx="3"/><rect class="c3" x="762" y="188" width="32" height="30" rx="3"/><rect class="c2" x="798" y="188" width="32" height="30" rx="3"/><rect class="c1" x="834" y="188" width="32" height="30" rx="3"/><rect class="c1" x="870" y="188" width="32" height="30" rx="3"/><rect class="c2" x="906" y="188" width="32" height="30" rx="3"/>
+</g>
+</svg>

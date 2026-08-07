@@ -1,6 +1,29 @@
-# PichiaCLM — Codon Design with Buildable Candidates
+<div align="center">
 
-[English](README.md) · [中文](README.zh.md)
+# PichiaCLM
+
+### Several codon sequences a lab can actually build — and that actually differ from each other.
+
+![One amino-acid sequence fanning out into four codon sequences with visibly different patterns](docs/assets/hero-candidates.svg)
+
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=flat-square&logo=streamlit&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
+![pytest](https://img.shields.io/badge/pytest-0A9EDC?style=flat-square&logo=pytest&logoColor=white)
+
+[![Fork](https://img.shields.io/badge/fork%20of-owen--min%2FPichiaCLM--Torch-8b8b85?style=flat-square&logo=github&logoColor=white)](https://github.com/owen-min/PichiaCLM-Torch)
+[![CPU](https://img.shields.io/badge/inference-CPU%2C%20weights%20in%20repo-0F766E?style=flat-square)](#the-model)
+[![Core deps](https://img.shields.io/badge/core%20dependency-torch%20only-brightgreen?style=flat-square)](#tech-stack)
+[![Tests](https://img.shields.io/badge/tests-24-brightgreen?style=flat-square)](tests)
+
+[Attribution](#attribution) · [The model](#the-model) · [Method](#method-how-a-candidate-becomes-acceptable) · [Quick start](#quick-start) · [Tech stack](#tech-stack) · [Boundaries](#boundaries)
+
+[**English**](README.md) · [中文](README.zh.md)
+
+</div>
+
+---
 
 > Turns a protein sequence into several **synonymous CDS candidates that differ from each other**,
 > each screened for sequence-level construction risk, and none of which is allowed to be worse than
@@ -9,8 +32,6 @@
 The "differ from each other" part is the whole point. A generator that returns five candidates which
 are actually the same sequence has returned one candidate — and a wet lab cannot run that as five
 constructs.
-
----
 
 ## Attribution
 
@@ -33,14 +54,17 @@ Not a Transformer — a **multi-task GRU Seq2Seq with scaled dot-product attenti
   protein it is supposed to encode
 - scaled dot-product attention (`dot_product_attention`) between decoder state and encoder outputs
 
-Weights ship in the repository (~37 MB) and inference runs on CPU. No GPU, no download step.
+Weights ship in the repository (35.6 MB) and inference runs on CPU. No GPU, no download step —
+for an internal lab tool, "clone it and it runs" beats a bigger model.
 
 ## Method: how a candidate becomes acceptable
 
 Sampling synonymous codons is easy. Getting candidates a lab can actually build is where the work is.
 
+![The loop takes the least similar draft first, filters it against three baseline-relative criteria, and returns fewer candidates rather than padding](docs/assets/selection-loop.svg)
+
 **1 — Constrained generation.** Decoding is masked so only codons synonymous with the target residue
-can be emitted. Translation-identity is therefore structural, not something checked afterwards and
+can be emitted. Translation identity is therefore structural, not something checked afterwards and
 hoped for.
 
 **2 — Sequence safety analysis** ([`core/analysis.py`](Model_PichiaCLM/core/analysis.py)). Every
@@ -54,6 +78,10 @@ that look good in a metric:
 | `TandemRepeat` · `RepeatedKmer` | repeats cause assembly misalignment |
 | `MotifHit` | unintended restriction sites and regulatory motifs |
 | `CAIComparison` | codon adaptation, computed against **two** reference frames |
+
+Rare-codon runs are flagged per reference frame, and **not flagged at all for single-codon amino
+acids** — there is no alternative to act on there, and an unactionable warning only dilutes the ones
+that matter.
 
 **3 — Two reference frames, neither used as a gate.** CAI is computed against both the training-set
 codon frequencies and public Kazusa frequencies. They disagree, and that disagreement is
@@ -80,23 +108,57 @@ notices.
 
 ## Quick start
 
+```bash
+git clone https://github.com/77652189/PichiaCLM-Torch.git
+cd PichiaCLM-Torch
+pip install -r requirements-streamlit.txt
+```
+
 ```powershell
 python -m streamlit run Model_PichiaCLM/interfaces/streamlit_app.py
 ```
 
+No weights download and no GPU — inference runs on CPU against the checked-in weights.
+
 Three interfaces share one core — Streamlit, CLI ([`interfaces/cli.py`](Model_PichiaCLM/interfaces/cli.py)),
-and HTTP API ([`interfaces/api.py`](Model_PichiaCLM/interfaces/api.py)). ADR-0001 requires all three
-to surface the same generation and quality verdicts, so a candidate cannot look acceptable in one
-entry point and unacceptable in another.
+and HTTP API ([`interfaces/api.py`](Model_PichiaCLM/interfaces/api.py)):
+
+```bash
+python -m Model_PichiaCLM.interfaces.cli --help
+uvicorn Model_PichiaCLM.interfaces.api:app --port 8000   # pip install -r requirements-api.txt
+```
+
+ADR-0001 requires all three to surface the same generation and quality verdicts, so a candidate
+cannot look acceptable in one entry point and unacceptable in another.
+
+```bash
+python -m pytest tests/     # 24 tests
+```
+
+## Tech stack
+
+| Layer | Choice | Why this one |
+| --- | --- | --- |
+| Model | PyTorch, multi-task GRU Seq2Seq | Small enough to run on CPU with weights in the repository; the auxiliary reconstruction head constrains the codon head rather than saving parameters |
+| Core dependency | **`torch` and nothing else** | `requirements-core.txt` is one line. Analysis, biology utilities and restriction scanning are standard library, so the scientific core carries no interface baggage |
+| Interfaces | Streamlit · FastAPI · CLI | Split into `requirements-streamlit.txt` and `requirements-api.txt`, each layered on core — installing the UI does not pull in the web framework, or the reverse |
+| Contracts | Pydantic | Request and result schemas at the API boundary |
+| Tests | pytest over `unittest.TestCase` | 24 tests; a `FakePredictor` stands in for the model so the suite tests generation and screening logic rather than weights |
+
+The dependency split is the layering made checkable: if `core/` ever imports Streamlit, installing
+`requirements-core.txt` alone stops working.
 
 ## Boundaries
 
 - **No yield prediction.** Candidates are screened for construction risk, not for expression level.
   A passing candidate is not a prediction of experimental success.
 - **The port is upstream work** — see [Attribution](#attribution).
+- **Not a Transformer.** GRU Seq2Seq with dot-product attention; saying otherwise is easy and wrong.
 - **Codon preference statistics are descriptive.** They are shown for human comparison, not used as
   thresholds.
 - **Fewer candidates than requested is a valid outcome**, and is reported explicitly.
+- **Testing is the thinnest part.** 24 tests cover the invariants that fail silently, but there is
+  no end-to-end regression against the real model.
 
 ## Documentation
 
@@ -108,6 +170,12 @@ entry point and unacceptable in another.
 | [Handoff](docs/HANDOFF.md) | the active slice changes |
 | [ADR index](docs/adr/README.md) | never — decisions are superseded, not edited |
 
+Deployment layout and interface split: [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ---
 
-> More work at [my personal site](https://77652189.github.io).
+<div align="center">
+
+More work at [my personal site](https://77652189.github.io).
+
+</div>
