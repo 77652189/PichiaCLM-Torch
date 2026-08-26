@@ -17,6 +17,8 @@ PyTorch 权重与训练参考数据
 - `interfaces` 仅负责参数适配、呈现与传输；不得在接口层重新实现 CDS 生物学判断、候选筛选或质量判定。
 - `core` 是预测、候选生成、质量分析和保守同义后处理的唯一业务规则来源；各接口应复用该层，而非产生各自不一致的结果。
 - 最终候选的可接受性由 `core` 相对基准 CDS 判定：不得有关键问题、不得增加风险警告，也不得增加可避免的最低偏好密码子。CAI 和其他密码子偏好统计用于审查和比较，不单独决定合格状态；见 [ADR-0001](adr/ADR-0001-qualified-candidate-acceptance.md)。
+- 候选子集的相似度阈值判定由 `core` 计算与自报：接口层不得把 `threshold_is_placeholder=True` 的占位阈值展示为已验证的生物学判断，也不得隐藏或吞掉 `constraint_satisfied=False` 的结果；见 [ADR-0002](adr/ADR-0002-similarity-hard-threshold.md)。
+- `core.analysis.min_max_profile` 当前只接受宿主密码子频率表：任何呈现该曲线的接口都不得暗示它验证了源物种翻译暂停位点被保留；见 [ADR-0003](adr/ADR-0003-min-max-host-only-profile.md)。
 - 训练数据和模型权重是推理输入，不应由运行时接口写回或就地修改。
 - 测试应从公共核心行为或接口契约验证结果，避免把 Streamlit 展示细节当作生物学规则的唯一证据。
 

@@ -64,6 +64,9 @@ class PichiaCLMPredictor:
         seed: int | None = None,
         max_attempts: int | None = None,
         subset_size: int | None = 5,
+        strategy: str = "kazusa_diverse",
+        max_codon_similarity_percent: float | None = None,
+        harmonization_target=None,
         motifs: Iterable[str] | None = None,
         custom_restriction_sites: Iterable[str] | None = None,
     ):
@@ -78,10 +81,13 @@ class PichiaCLMPredictor:
                 seed=seed,
                 max_attempts=max_attempts,
                 subset_size=subset_size,
+                strategy=strategy,
+                max_codon_similarity_percent=max_codon_similarity_percent,
             ),
             allow_unknown=allow_unknown,
             motifs=motifs,
             custom_restriction_sites=custom_restriction_sites,
+            harmonization_target=harmonization_target,
         )
 
     def _predict_with_strategy(

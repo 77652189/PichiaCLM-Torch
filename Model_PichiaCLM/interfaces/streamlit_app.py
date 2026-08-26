@@ -27,6 +27,18 @@ from Model_PichiaCLM.core.predictor import PichiaCLMPredictor
 
 DEFAULT_SEQUENCE = "MSTNPKPQR"
 DIRECT_MODE_LABEL = "直接加载模型"
+
+STRATEGY_LABEL_SWAP = "随机同义替换（默认）"
+STRATEGY_LABEL_SAMPLING = "温度采样"
+STRATEGY_BY_LABEL = {
+    STRATEGY_LABEL_SWAP: "kazusa_diverse",
+    STRATEGY_LABEL_SAMPLING: "temperature_sampling",
+}
+RANKING_CRITERION_LABELS = {
+    "harmonization": "源物种 harmonization（曲线形状吻合度）",
+    "host_worst_dip": "宿主最深负谷（代理指标）",
+    "none": "未重排（按选出顺序）",
+}
 API_MODE_LABEL = "调用 FastAPI"
 
 
@@ -326,8 +338,18 @@ def predict_candidates_direct(
     subset_size: int,
     temperature: float,
     seed: int | None,
+    strategy: str = "kazusa_diverse",
+    max_codon_similarity_percent: float | None = None,
+    source_taxon_id: int | None = None,
+    source_native_cds: str | None = None,
 ) -> dict[str, object]:
+    from Model_PichiaCLM.core.source_reference import build_harmonization_target
+
     predictor = load_predictor_with_candidates(weights_path, device)
+    harmonization_target = build_harmonization_target(
+        source_taxon_id=source_taxon_id,
+        source_native_cds=source_native_cds,
+    )
     return asdict(
         predictor.predict_candidates(
             amino_acids,
@@ -336,6 +358,9 @@ def predict_candidates_direct(
             subset_size=subset_size,
             temperature=temperature,
             seed=seed,
+            strategy=strategy,
+            max_codon_similarity_percent=max_codon_similarity_percent,
+            harmonization_target=harmonization_target,
             motifs=motifs,
             custom_restriction_sites=custom_sites,
         )
@@ -352,6 +377,10 @@ def predict_candidates_via_api(
     subset_size: int,
     temperature: float,
     seed: int | None,
+    strategy: str = "kazusa_diverse",
+    max_codon_similarity_percent: float | None = None,
+    source_taxon_id: int | None = None,
+    source_native_cds: str | None = None,
 ) -> dict[str, object]:
     response = requests.post(
         f"{api_url.rstrip('/')}/predict_candidates",
@@ -362,6 +391,10 @@ def predict_candidates_via_api(
             "temperature": temperature,
             "seed": seed,
             "allow_unknown": allow_unknown,
+            "strategy": strategy,
+            "max_codon_similarity_percent": max_codon_similarity_percent,
+            "source_taxon_id": source_taxon_id,
+            "source_native_cds": source_native_cds,
             "unwanted_motifs": motifs,
             "custom_restriction_sites": custom_sites,
         },
@@ -441,6 +474,10 @@ def run_candidate_prediction(
     subset_size: int,
     temperature: float,
     seed: int | None,
+    strategy: str = "kazusa_diverse",
+    max_codon_similarity_percent: float | None = None,
+    source_taxon_id: int | None = None,
+    source_native_cds: str | None = None,
 ) -> dict[str, object]:
     if mode == DIRECT_MODE_LABEL:
         return predict_candidates_direct(
@@ -454,6 +491,10 @@ def run_candidate_prediction(
             subset_size,
             temperature,
             seed,
+            strategy=strategy,
+            max_codon_similarity_percent=max_codon_similarity_percent,
+            source_taxon_id=source_taxon_id,
+            source_native_cds=source_native_cds,
         )
     return predict_candidates_via_api(
         api_url,
@@ -465,6 +506,10 @@ def run_candidate_prediction(
         subset_size,
         temperature,
         seed,
+        strategy=strategy,
+        max_codon_similarity_percent=max_codon_similarity_percent,
+        source_taxon_id=source_taxon_id,
+        source_native_cds=source_native_cds,
     )
 
 
@@ -782,6 +827,37 @@ def render_candidate_set_result(result: dict[str, object]) -> None:
         subset_c.metric("最高密码子相似度", value_or_dash(recommended_subset["max_codon_similarity_percent"]))
         st.write("推荐候选排名：" + "、".join(str(rank) for rank in recommended_subset["selected_ranks"]))
         st.caption("这组序列是在已生成候选中挑出的低相似度组合；所有序列仍保留各自的翻译一致性和质量检查结果。")
+
+        # Hard gate result (ADR-0002/0004): never let an unmet constraint pass
+        # as if it had been satisfied.
+        threshold_codon = recommended_subset.get("codon_similarity_threshold_percent")
+        if recommended_subset.get("constraint_satisfied"):
+            st.success(
+                f"相似度硬门槛：满足（密码子相似度 ≤ {threshold_codon}%；"
+                f"实际最高 {value_or_dash(recommended_subset['max_codon_similarity_percent'])}%）"
+            )
+        else:
+            st.error(
+                f"相似度硬门槛：**未满足**。门槛为密码子相似度 ≤ {threshold_codon}%，"
+                f"但这组候选实际最高为 {value_or_dash(recommended_subset['max_codon_similarity_percent'])}%。"
+                "这仍然是所有组合里最不相似的一组，但它没有达到门槛——不要直接按这组送样。"
+            )
+        st.caption(
+            f"参考：这组的 bp 相似度为 {value_or_dash(recommended_subset['min_bp_similarity_percent'])}%–"
+            f"{value_or_dash(recommended_subset['max_bp_similarity_percent'])}%（仅供审查，不参与判定，ADR-0007）。"
+        )
+        if recommended_subset.get("threshold_is_placeholder"):
+            st.warning(
+                "当前门槛是占位值，不是湿实验方确认的数字（来源见 ADR-0004）。拿到真实上限后请在上方勾选"
+                "「自定义相似度上限」填入。"
+            )
+        st.caption(
+            "排序依据："
+            + RANKING_CRITERION_LABELS.get(
+                recommended_subset.get("ranking_criterion", "none"),
+                recommended_subset.get("ranking_criterion", "none"),
+            )
+        )
         subset_pair_rows = [
             {
                 "候选 A": row["left_rank"],
@@ -822,6 +898,43 @@ def render_candidate_set_result(result: dict[str, object]) -> None:
             file_name="pichiaclm_low_similarity_subset.csv",
             mime="text/csv",
         )
+        render_min_max_profiles(selected_candidates)
+
+
+def render_min_max_profiles(candidates: list[dict[str, object]]) -> None:
+    """Plot each recommended candidate's %MinMax curve under host frequencies.
+
+    Computed here from the returned CDS rather than shipped in the response so
+    the API contract stays unchanged; the curve is review information, not a
+    pass/fail verdict.
+    """
+    from Model_PichiaCLM.core.analysis import load_training_codon_reference, min_max_profile
+    from Model_PichiaCLM.core.biology import split_codons
+
+    if not candidates:
+        return
+    host_fractions, _ = load_training_codon_reference()
+    series: dict[str, dict[int, float]] = {}
+    for candidate in candidates:
+        windows = min_max_profile(split_codons(candidate["cds"]), host_fractions)
+        points = {window.start_codon: window.percent for window in windows if window.percent is not None}
+        if points:
+            series[f"候选 {candidate['rank']}"] = points
+
+    st.subheader("%MinMax 局部翻译速度谱（相对宿主频率）")
+    if not series:
+        st.caption(
+            "序列长度不足一个 %MinMax 窗口（18 个密码子），无法绘制曲线——这是「算不了」，不是「结果不好」。"
+        )
+        return
+    positions = sorted({position for points in series.values() for position in points})
+    st.line_chart(
+        {name: [points.get(position) for position in positions] for name, points in series.items()}
+    )
+    st.caption(
+        "横轴是窗口起始密码子位置，纵轴 +100 表示该段全用同义家族里最常用的密码子，-100 表示全用最不常用的；"
+        "负值的谷是相对宿主的潜在翻译暂停位点。这是供人工审查的信息，不单独决定候选是否合格。"
+    )
 
     fasta_records = [
         FastaRecord(
@@ -932,10 +1045,77 @@ def render_candidates_tab(settings: dict[str, object]) -> None:
     temperature = float(col_c.slider("采样温度", min_value=0.1, max_value=2.0, value=0.8, step=0.1))
     use_seed = col_d.checkbox("固定随机种子", value=True)
     seed = int(st.number_input("随机种子", min_value=0, value=42, step=1)) if use_seed else None
-    st.caption(
-        "候选序列都必须翻译回同一个 AA。当前策略从基准 CDS 出发做 10%-20% 以内的小幅同义替换，"
-        "优先使用 Kazusa 次优/中频密码子，并尽量不增加最低频密码子。"
+
+    strategy_label = st.radio(
+        "候选生成路径",
+        options=[STRATEGY_LABEL_SWAP, STRATEGY_LABEL_SAMPLING],
+        horizontal=True,
+        key="candidate_strategy",
+        help="两条路径同级，自行选择。",
     )
+    strategy = STRATEGY_BY_LABEL[strategy_label]
+    if strategy == "kazusa_diverse":
+        st.caption(
+            "随机同义替换：从基准 CDS 出发做 10%-20% 以内的小幅同义替换，优先使用 Kazusa 次优/中频密码子，"
+            "并尽量不增加最低频密码子。"
+        )
+    else:
+        st.caption(
+            "温度采样：每条候选都由模型按上面的采样温度整条采出，不套用 10%-20% 差异区间。"
+        )
+        st.warning(
+            "已知限制：这条路径的产出率取决于具体序列。候选的「可避免最低偏好密码子数」不得高于基准"
+            "（ADR-0001），基准序列在该门槛下留出的余量因序列而异——实测 153 aa 能出满 10 条，"
+            "另一条 150 aa 序列只出 6 条，300 aa 只剩基准本身。若结果显示 exhausted=True 且候选很少，"
+            "属于该门槛，不是随机种子问题；可改用左侧的随机同义替换路径。"
+        )
+
+    with st.expander("相似度硬门槛与 %MinMax 排序（可选）", expanded=False):
+        use_custom_threshold = st.checkbox(
+            "自定义密码子相似度上限（不勾选则使用文献参考占位值 80%）",
+            value=False,
+            key="candidate_custom_threshold",
+        )
+        if use_custom_threshold:
+            max_codon_similarity = float(
+                st.number_input("密码子相似度上限 %", min_value=0.0, max_value=100.0, value=80.0, step=1.0)
+            )
+        else:
+            max_codon_similarity = None
+            st.caption(
+                "占位值来自 Quan et al. 2011 同义变体库实测一致性（79%-82% 均值），不是湿实验方确认的数字（ADR-0004）。"
+            )
+        st.caption(
+            "硬门槛只看密码子轴。bp（碱基）相似度仍会计算并展示，但不作为通过/失败判据——"
+            "同义变体的密码子前两位被氨基酸锁死，碱基相似度有远高于任何有用上限的下限"
+            "（hLF 实测 88%-94%），拿它当门槛会让判定恒为不通过（ADR-0007）。"
+        )
+
+        st.markdown("**源物种 harmonization 排序**（填了才启用；两项必须都填）")
+        src_a, src_b = st.columns([1, 3])
+        use_harmonization = src_a.checkbox("启用", value=False, key="candidate_use_harmonization")
+        source_taxon_id = (
+            int(src_b.number_input("源物种 taxon id（人类 = 9606）", min_value=1, value=9606, step=1))
+            if use_harmonization
+            else None
+        )
+        source_native_cds = (
+            st.text_area(
+                "源基因天然 CDS（由研发组同事提供，需与设计逐密码子对齐）",
+                value="",
+                height=110,
+                key="candidate_source_cds",
+                help="氨基酸序列不能代替：它不携带源物种当年在每个位置具体选了哪个同义密码子。",
+            ).strip()
+            or None
+            if use_harmonization
+            else None
+        )
+        if use_harmonization:
+            st.caption(
+                "启用后，推荐子集按「候选在宿主频率下的 %MinMax 曲线」与「源基因在源物种频率下的曲线」"
+                "的平均绝对差重排（越小越前）。抓不到源物种数据会直接报错，不会退回宿主数据（ADR-0006）。"
+            )
     if settings["do_postprocess"]:
         st.info("多候选 CDS 默认不自动执行保守后处理；建议先选择候选，再进入单条或二次 CDS 质检流程复核。")
 
@@ -954,6 +1134,10 @@ def render_candidates_tab(settings: dict[str, object]) -> None:
                 subset_size=subset_size,
                 temperature=temperature,
                 seed=seed,
+                strategy=strategy,
+                max_codon_similarity_percent=max_codon_similarity,
+                source_taxon_id=source_taxon_id,
+                source_native_cds=source_native_cds,
             )
         except Exception as exc:
             st.error(str(exc))

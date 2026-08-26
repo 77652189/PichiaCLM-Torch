@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 uvicorn.*.log
 streamlit.*.log
+Model_PichiaCLM/Training/ExternalReferenceCache/

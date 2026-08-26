@@ -21,6 +21,7 @@ LOCAL_GC_MAX = 75.0
 HOMOPOLYMER_MIN_LENGTH = 6
 RARE_CODON_FRACTION = 0.10
 RARE_CODON_RUN_MIN_LENGTH = 2
+MIN_MAX_WINDOW = 18
 
 TRAINING_DATA_DIR = Path(__file__).resolve().parents[1] / "Training" / "AllData"
 
@@ -211,6 +212,21 @@ class MotifHit:
     motif: str
     start: int
     end: int
+
+
+@dataclass(frozen=True)
+class MinMaxWindow:
+    start_codon: int
+    end_codon: int
+    percent: float | None
+
+
+@dataclass(frozen=True)
+class MinMaxProfileComparison:
+    comparable_windows: int
+    skipped_windows: int
+    mean_absolute_difference: float | None
+    max_absolute_difference: float | None
 
 
 @dataclass(frozen=True)
@@ -411,6 +427,135 @@ def find_rare_codon_runs(
             )
         )
     return runs
+
+
+def min_max_profile(
+    codons: list[str],
+    reference_fractions: dict[str, float],
+    window: int = MIN_MAX_WINDOW,
+) -> list[MinMaxWindow]:
+    """%MinMax local translation-speed profile (Clarke & Clark 2008).
+
+    Slides a window of ``window`` codons along the sequence. In each window,
+    averages, over codons with more than one synonymous option, the relative
+    usage frequency of the codon actually used (Actual) against the
+    synonymous family's max/min/mean frequency (Max/Min/Avg) under
+    ``reference_fractions``. A window mostly using the family's most-used
+    codons scores near +100; one mostly using the family's least-used codons
+    scores near -100. Stop codons, codons absent from the genetic code
+    table, and codons from single-member synonymous families (e.g. Met,
+    Trp -- there is no faster or slower choice) are excluded from the
+    window average; the first two exclusions match how rare-codon and CAI
+    calculations already treat them elsewhere in this module. A window is
+    never silently dropped: if every codon in it falls into one of those
+    exclusions (e.g. a run of >= ``window`` consecutive Met/Trp/stop
+    codons), it is still returned with ``percent=None`` rather than being
+    omitted, so ``start_codon`` stays contiguous and callers can tell "no
+    comparable codons here" apart from "not computed".
+
+    ``reference_fractions`` is not fixed to any one organism: pass training
+    or public Pichia fractions to profile translation speed relative to the
+    expression host. See ADR-0003 for why a same-organism host profile, not
+    a source-organism profile, is what this function currently computes.
+    """
+    if len(codons) < window:
+        return []
+
+    per_codon = []
+    for codon in codons:
+        aa = CODON_TO_AA.get(codon)
+        if aa is None or aa == "*":
+            per_codon.append(None)
+            continue
+        synonymous = AA_TO_CODONS[aa]
+        if len(synonymous) <= 1:
+            per_codon.append(None)
+            continue
+        fractions = [reference_fractions.get(item, 0.0) for item in synonymous]
+        per_codon.append(
+            (
+                reference_fractions.get(codon, 0.0),
+                max(fractions),
+                min(fractions),
+                sum(fractions) / len(fractions),
+            )
+        )
+
+    windows = []
+    for start in range(0, len(codons) - window + 1):
+        included = [item for item in per_codon[start : start + window] if item is not None]
+        if not included:
+            windows.append(MinMaxWindow(start_codon=start + 1, end_codon=start + window, percent=None))
+            continue
+        actual = sum(item[0] for item in included) / len(included)
+        maximum = sum(item[1] for item in included) / len(included)
+        minimum = sum(item[2] for item in included) / len(included)
+        average = sum(item[3] for item in included) / len(included)
+
+        if actual > average and (maximum - average) > 0:
+            percent = (actual - average) / (maximum - average) * 100
+        elif actual < average and (average - minimum) > 0:
+            percent = -(average - actual) / (average - minimum) * 100
+        else:
+            percent = 0.0
+
+        windows.append(
+            MinMaxWindow(
+                start_codon=start + 1,
+                end_codon=start + window,
+                percent=round(percent, 2),
+            )
+        )
+    return windows
+
+
+def compare_min_max_profiles(
+    left: list[MinMaxWindow],
+    right: list[MinMaxWindow],
+) -> MinMaxProfileComparison:
+    """Compare two %MinMax profiles window by window.
+
+    Used for codon harmonization (Wright et al. 2022): ``left`` is typically
+    the source gene profiled under its own organism's codon frequencies and
+    ``right`` a candidate design profiled under the host's, so a small
+    difference means the design reproduces the source gene's local
+    translation-speed pattern -- the pattern co-translational folding is
+    thought to depend on -- rather than merely being fast everywhere.
+
+    The two profiles are compared positionally, so they must cover the same
+    number of codons at the same window size; a length mismatch raises rather
+    than being aligned or truncated, because silently shifting one profile
+    against the other would compare unrelated positions and still return a
+    plausible-looking number. Windows where either side is ``None`` (no
+    codons with synonymous alternatives, see ``min_max_profile``) are counted
+    as skipped instead of being treated as agreement.
+    """
+    if len(left) != len(right):
+        raise ValueError(
+            f"%MinMax profiles cover different window counts ({len(left)} vs {len(right)}); they must "
+            "describe the same number of codons at the same window size to be compared positionally. "
+            "Check that the source CDS and the candidate encode the same protein region."
+        )
+
+    differences = [
+        abs(left_window.percent - right_window.percent)
+        for left_window, right_window in zip(left, right)
+        if left_window.percent is not None and right_window.percent is not None
+    ]
+    skipped = len(left) - len(differences)
+    if not differences:
+        return MinMaxProfileComparison(
+            comparable_windows=0,
+            skipped_windows=skipped,
+            mean_absolute_difference=None,
+            max_absolute_difference=None,
+        )
+    return MinMaxProfileComparison(
+        comparable_windows=len(differences),
+        skipped_windows=skipped,
+        mean_absolute_difference=round(sum(differences) / len(differences), 2),
+        max_absolute_difference=round(max(differences), 2),
+    )
 
 
 def find_homopolymers(cds: str) -> list[HomopolymerRun]:

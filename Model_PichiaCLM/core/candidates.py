@@ -16,14 +16,76 @@ from .analysis import (
     GLOBAL_GC_MIN,
     HOMOPOLYMER_MIN_LENGTH,
     PUBLIC_PICHIA_PASTORIS_FRACTIONS,
+    MinMaxWindow,
     SequenceAnalysisReport,
     analyze_cds,
+    compare_min_max_profiles,
     gc_percent,
+    load_training_codon_reference,
+    min_max_profile,
 )
 from .biology import check_translation, normalize_motifs, split_codons
 from .restriction import parse_custom_sites, scan_restriction_sites
 from .schemas import PredictionResult
 from .vocab import build_vocabularies
+
+
+# Wet-lab has asked that submitted candidates not be too similar to each
+# other, but has not yet supplied a numeric ceiling. Pending that number,
+# this uses Quan et al. 2011 (Nat Biotechnol, "Parallel on-chip gene
+# synthesis...") as a literature reference point: a synonymous-variant
+# library built for the same kind of parallel synthesis/expression
+# screening reached ~79-82% mean pairwise identity. That figure is a mean
+# over a large library, not the max over a small selected subset used here,
+# so treating it as a max ceiling is not more permissive than the
+# precedent. This is still not a wet-lab-confirmed number -- see ADR-0004
+# (supersedes ADR-0002's "no source" framing; ADR-0002 still governs the
+# hard-gate mechanism itself). Replace via
+# CandidateGenerationOptions.max_codon_similarity_percent once wet-lab
+# supplies a real ceiling.
+#
+# The gate is codon-axis only (ADR-0007). Base-level similarity between
+# synonymous variants has a floor far above any useful ceiling -- the first
+# two codon positions are pinned by the amino acid, so only the wobble base
+# is free (measured on hLF: 88.0%-93.8%). A bp threshold could therefore
+# never be met and made the gate permanently red. bp similarity is still
+# reported, as review information rather than as a verdict.
+PLACEHOLDER_MAX_CODON_SIMILARITY_PERCENT = 80.0
+
+# Two candidate-pool generation strategies, selected via
+# CandidateGenerationOptions.strategy. See ADR-0005.
+#
+# STRATEGY_KAZUSA_DIVERSE (default, unchanged): force synonymous swaps at a
+# fixed 10%-20% distance from the reference, then greedily keep the most
+# mutually diverse drafts.
+#
+# STRATEGY_TEMPERATURE_SAMPLING: draw whole candidates from
+# CandidatePredictor.predict_sample at options.temperature instead of forcing
+# a distance band -- diversity comes from the sampling distribution itself,
+# not from an imposed percentage. Its pool does not apply
+# min_difference_percent / max_difference_percent (see
+# _draft_remains_lightweight_acceptable): re-applying that band would keep
+# the exact mechanism this strategy exists to avoid.
+STRATEGY_KAZUSA_DIVERSE = "kazusa_diverse"
+STRATEGY_TEMPERATURE_SAMPLING = "temperature_sampling"
+_VALID_STRATEGIES = (STRATEGY_KAZUSA_DIVERSE, STRATEGY_TEMPERATURE_SAMPLING)
+
+
+@dataclass(frozen=True)
+class MinMaxHarmonizationTarget:
+    """Source-organism reference for %MinMax harmonization ranking (ADR-0006).
+
+    ``source_cds`` is the gene's *native* coding sequence in the source
+    organism -- not the amino acid sequence, and not a design. Which
+    synonymous codon nature used at each position is the whole signal being
+    harmonized against, and the amino acid sequence does not carry it.
+    ``source_fractions`` is that organism's codon usage table (for the
+    current hLF/OPN targets, Homo sapiens); ``core.source_reference`` fetches
+    and caches both.
+    """
+
+    source_cds: str
+    source_fractions: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -37,6 +99,7 @@ class CandidateGenerationOptions:
     min_difference_percent: float = 10.0
     max_difference_percent: float = 20.0
     subset_size: int | None = 5
+    max_codon_similarity_percent: float | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +164,17 @@ class CandidateSubsetSelection:
     min_codon_similarity_percent: float | None
     mean_codon_similarity_percent: float | None
     max_codon_similarity_percent: float | None
+    # No bp threshold: the gate is codon-axis only (ADR-0007). The
+    # min_/mean_/max_bp_similarity_percent fields above are measurements kept
+    # for review, not criteria.
+    codon_similarity_threshold_percent: float
+    threshold_is_placeholder: bool
+    constraint_satisfied: bool
+    # Which preference reordered selected_ranks: "harmonization" (matched
+    # against a source-organism profile, ADR-0006), "host_worst_dip" (host-only
+    # proxy, ADR-0005), or "none" (order left as selected). Reported so a
+    # reader can tell which criterion produced the order instead of guessing.
+    ranking_criterion: str = "none"
 
 
 @dataclass(frozen=True)
@@ -174,6 +248,7 @@ def generate_cds_candidates(
     allow_unknown: bool = False,
     motifs: Iterable[str] | None = None,
     custom_restriction_sites: Iterable[str] | None = None,
+    harmonization_target: MinMaxHarmonizationTarget | None = None,
 ) -> CandidateSet:
     options = options or CandidateGenerationOptions()
     _validate_options(options)
@@ -196,6 +271,8 @@ def generate_cds_candidates(
 
     pool, attempts = _generate_candidate_pool(
         reference,
+        predictor=predictor,
+        allow_unknown=allow_unknown,
         options=options,
         rng=rng,
         reference_preference=reference_preference,
@@ -225,6 +302,7 @@ def generate_cds_candidates(
         candidate = _candidate_from_draft(
             draft,
             reference=reference,
+            source=options.strategy,
             motifs=motifs,
             custom_restriction_sites=custom_restriction_sites,
         )
@@ -239,7 +317,18 @@ def generate_cds_candidates(
         candidates,
         pairwise_similarities,
         subset_size=options.subset_size,
+        max_codon_similarity_percent=options.max_codon_similarity_percent,
     )
+    # A harmonization target ranks under either strategy: matching a source
+    # profile is a property of the sequences, not of how they were generated.
+    # Silently ignoring a supplied target under the default strategy would hand
+    # back an unranked subset that looks ranked.
+    if recommended_subset is not None and (
+        harmonization_target is not None or options.strategy == STRATEGY_TEMPERATURE_SAMPLING
+    ):
+        recommended_subset = _rank_subset_by_min_max(
+            recommended_subset, candidates, harmonization_target=harmonization_target
+        )
     exhausted = len(candidates) < requested
     note = None
     if exhausted:
@@ -358,10 +447,26 @@ def select_low_similarity_subset(
     pairwise_rows: list[CandidatePairSimilarity],
     *,
     subset_size: int | None = 5,
+    max_codon_similarity_percent: float | None = None,
     max_exact_combinations: int = 20_000,
 ) -> CandidateSubsetSelection | None:
+    """Pick the pairwise-least-similar subset of the requested size and grade
+    it against an explicit codon-similarity ceiling.
+
+    This is a hard constraint, not a minimizer: the returned selection always
+    reports whether it actually satisfies the ceiling
+    (``constraint_satisfied``) instead of silently handing back the
+    least-bad subset as if it had passed. When
+    ``max_codon_similarity_percent`` is not supplied, a placeholder ceiling
+    is used and flagged via ``threshold_is_placeholder`` -- see ADR-0002.
+
+    Only the codon axis gates (ADR-0007); bp similarity is measured and
+    reported but cannot fail a subset, because synonymous variants share
+    almost all bases by construction.
+    """
     if not candidates or subset_size is None:
         return None
+    codon_threshold, threshold_is_placeholder = _resolve_similarity_threshold(max_codon_similarity_percent)
     requested_size = max(1, subset_size)
     selected_size = min(requested_size, len(candidates))
     ranks = [candidate.rank for candidate in candidates]
@@ -373,6 +478,8 @@ def select_low_similarity_subset(
             requested_size=requested_size,
             method="all_candidates",
             pair_lookup=pair_lookup,
+            codon_threshold=codon_threshold,
+            threshold_is_placeholder=threshold_is_placeholder,
         )
 
     combination_count = math.comb(len(ranks), selected_size)
@@ -391,7 +498,87 @@ def select_low_similarity_subset(
         requested_size=requested_size,
         method=method,
         pair_lookup=pair_lookup,
+        codon_threshold=codon_threshold,
+        threshold_is_placeholder=threshold_is_placeholder,
     )
+
+
+def _resolve_similarity_threshold(max_codon_similarity_percent: float | None) -> tuple[float, bool]:
+    if max_codon_similarity_percent is None:
+        return PLACEHOLDER_MAX_CODON_SIMILARITY_PERCENT, True
+    return max_codon_similarity_percent, False
+
+
+def _rank_subset_by_min_max(
+    subset: CandidateSubsetSelection,
+    candidates: list[CdsCandidate],
+    *,
+    harmonization_target: MinMaxHarmonizationTarget | None = None,
+) -> CandidateSubsetSelection:
+    """Reorder an already-chosen subset's ranks by %MinMax preference.
+
+    Only reorders; never changes which candidates were selected, and never
+    merges into a combined score with the similarity constraint (ADR-0002).
+
+    Two criteria, depending on whether a source organism is known:
+
+    - With ``harmonization_target`` (ADR-0006): rank by how closely the
+      candidate's host-frequency %MinMax profile reproduces the *shape* of
+      the source gene's profile under its own organism's frequencies -- the
+      codon-harmonization criterion of Wright et al. 2022. Smaller mean
+      absolute difference sorts first.
+    - Without one: fall back to the host-only proxy, ranking by the shallowest
+      worst negative dip, since with no target profile there is nothing to
+      match against and the only available preference is "introduce fewer
+      deep pauses in the host".
+
+    Ranks whose profile could not be computed or compared sort last: that is
+    "not comparable", not "worse".
+    """
+    training_fractions, _ = load_training_codon_reference()
+    candidate_by_rank = {candidate.rank: candidate for candidate in candidates}
+
+    if harmonization_target is None:
+        dip_by_rank = {
+            rank: _min_max_worst_dip_percent(candidate_by_rank[rank].cds, training_fractions)
+            for rank in subset.selected_ranks
+        }
+        ordered_ranks = sorted(
+            subset.selected_ranks,
+            key=lambda rank: (dip_by_rank[rank] is None, -(dip_by_rank[rank] or 0.0)),
+        )
+        return replace(subset, selected_ranks=ordered_ranks, ranking_criterion="host_worst_dip")
+
+    source_profile = min_max_profile(
+        split_codons(harmonization_target.source_cds),
+        harmonization_target.source_fractions,
+    )
+    distance_by_rank = {
+        rank: _harmonization_distance(candidate_by_rank[rank].cds, training_fractions, source_profile)
+        for rank in subset.selected_ranks
+    }
+    ordered_ranks = sorted(
+        subset.selected_ranks,
+        key=lambda rank: (distance_by_rank[rank] is None, distance_by_rank[rank] or 0.0),
+    )
+    return replace(subset, selected_ranks=ordered_ranks, ranking_criterion="harmonization")
+
+
+def _harmonization_distance(
+    cds: str,
+    host_fractions: dict[str, float],
+    source_profile: list[MinMaxWindow],
+) -> float | None:
+    candidate_profile = min_max_profile(split_codons(cds), host_fractions)
+    if not candidate_profile or not source_profile:
+        return None
+    return compare_min_max_profiles(source_profile, candidate_profile).mean_absolute_difference
+
+
+def _min_max_worst_dip_percent(cds: str, reference_fractions: dict[str, float]) -> float | None:
+    windows = min_max_profile(split_codons(cds), reference_fractions)
+    values = [window.percent for window in windows if window.percent is not None]
+    return min(values) if values else None
 
 
 def _pairwise_lookup(
@@ -448,11 +635,17 @@ def _subset_selection_from_ranks(
     requested_size: int,
     method: str,
     pair_lookup: dict[tuple[int, int], CandidatePairSimilarity],
+    codon_threshold: float,
+    threshold_is_placeholder: bool,
 ) -> CandidateSubsetSelection:
     selected_ranks = sorted(ranks)
     pair_rows = _subset_pair_rows(selected_ranks, pair_lookup)
     bp_similarities = [row.bp_similarity_percent for row in pair_rows]
     codon_similarities = [row.codon_similarity_percent for row in pair_rows]
+    max_bp_similarity = max(bp_similarities) if bp_similarities else None
+    max_codon_similarity = max(codon_similarities) if codon_similarities else None
+    # Codon axis only (ADR-0007); bp similarity is measured, never a criterion.
+    constraint_satisfied = max_codon_similarity is None or max_codon_similarity <= codon_threshold
     return CandidateSubsetSelection(
         requested_size=requested_size,
         selected_size=len(selected_ranks),
@@ -461,10 +654,13 @@ def _subset_selection_from_ranks(
         comparisons=len(pair_rows),
         min_bp_similarity_percent=min(bp_similarities) if bp_similarities else None,
         mean_bp_similarity_percent=_mean(bp_similarities),
-        max_bp_similarity_percent=max(bp_similarities) if bp_similarities else None,
+        max_bp_similarity_percent=max_bp_similarity,
         min_codon_similarity_percent=min(codon_similarities) if codon_similarities else None,
         mean_codon_similarity_percent=_mean(codon_similarities),
-        max_codon_similarity_percent=max(codon_similarities) if codon_similarities else None,
+        max_codon_similarity_percent=max_codon_similarity,
+        codon_similarity_threshold_percent=codon_threshold,
+        threshold_is_placeholder=threshold_is_placeholder,
+        constraint_satisfied=constraint_satisfied,
     )
 
 
@@ -593,6 +789,40 @@ def lightweight_risk(
 def _generate_candidate_pool(
     reference: PredictionResult,
     *,
+    predictor: CandidatePredictor,
+    allow_unknown: bool,
+    options: CandidateGenerationOptions,
+    rng: random.Random,
+    reference_preference: CodonPreferenceStats,
+    reference_risk: LightweightRisk,
+    motifs: Iterable[str] | None,
+    custom_restriction_sites: Iterable[str] | None,
+) -> tuple[list[CandidateDraft], int]:
+    if options.strategy == STRATEGY_TEMPERATURE_SAMPLING:
+        return _generate_candidate_pool_by_sampling(
+            reference,
+            predictor=predictor,
+            allow_unknown=allow_unknown,
+            options=options,
+            reference_preference=reference_preference,
+            reference_risk=reference_risk,
+            motifs=motifs,
+            custom_restriction_sites=custom_restriction_sites,
+        )
+    return _generate_candidate_pool_by_swapping(
+        reference,
+        options=options,
+        rng=rng,
+        reference_preference=reference_preference,
+        reference_risk=reference_risk,
+        motifs=motifs,
+        custom_restriction_sites=custom_restriction_sites,
+    )
+
+
+def _generate_candidate_pool_by_swapping(
+    reference: PredictionResult,
+    *,
     options: CandidateGenerationOptions,
     rng: random.Random,
     reference_preference: CodonPreferenceStats,
@@ -656,6 +886,75 @@ def _generate_candidate_pool(
     return pool, attempts
 
 
+def _generate_candidate_pool_by_sampling(
+    reference: PredictionResult,
+    *,
+    predictor: CandidatePredictor,
+    allow_unknown: bool,
+    options: CandidateGenerationOptions,
+    reference_preference: CodonPreferenceStats,
+    reference_risk: LightweightRisk,
+    motifs: Iterable[str] | None,
+    custom_restriction_sites: Iterable[str] | None,
+) -> tuple[list[CandidateDraft], int]:
+    reference_codons = split_codons(reference.cds)
+    pool_size = options.pool_size or min(120, max(20, (options.num_candidates - 1) * 6))
+    max_attempts = options.max_attempts or max(pool_size * 4, 60)
+    stale_limit = max(pool_size * 2, 40)
+
+    generator = torch.Generator(device=predictor.device)
+    if options.seed is not None:
+        generator.manual_seed(options.seed)
+
+    pool: list[CandidateDraft] = []
+    seen_signatures: set[tuple[tuple[int, str], ...]] = set()
+    attempts = 1
+    stale_attempts = 0
+
+    while len(pool) < pool_size and attempts < max_attempts and stale_attempts < stale_limit:
+        attempts += 1
+        sample = predictor.predict_sample(
+            reference.amino_acids,
+            allow_unknown=allow_unknown,
+            temperature=options.temperature,
+            generator=generator,
+        )
+        sampled_codons = split_codons(sample.cds)
+        if len(sampled_codons) != len(reference_codons):
+            stale_attempts += 1
+            continue
+        changes = {
+            position: codon
+            for position, (codon, reference_codon) in enumerate(zip(sampled_codons, reference_codons))
+            if codon != reference_codon
+        }
+        if not changes:
+            stale_attempts += 1
+            continue
+        signature = tuple(sorted(changes.items()))
+        if signature in seen_signatures:
+            stale_attempts += 1
+            continue
+        seen_signatures.add(signature)
+
+        draft = _draft_from_changes(reference, reference_codons, changes, attempts)
+        if not _draft_remains_lightweight_acceptable(
+            draft,
+            reference=reference,
+            reference_preference=reference_preference,
+            reference_risk=reference_risk,
+            options=options,
+            motifs=motifs,
+            custom_restriction_sites=custom_restriction_sites,
+        ):
+            stale_attempts += 1
+            continue
+        pool.append(draft)
+        stale_attempts = 0
+
+    return pool, attempts
+
+
 def _draft_from_changes(
     reference: PredictionResult,
     reference_codons: list[str],
@@ -695,9 +994,10 @@ def _draft_remains_lightweight_acceptable(
         )
     ):
         return False
-    diff = draft.difference_from_reference.codon_difference_percent
-    if diff < options.min_difference_percent or diff > options.max_difference_percent:
-        return False
+    if options.strategy != STRATEGY_TEMPERATURE_SAMPLING:
+        diff = draft.difference_from_reference.codon_difference_percent
+        if diff < options.min_difference_percent or diff > options.max_difference_percent:
+            return False
     if draft.codon_preference.avoidable_lowest_count > reference_preference.avoidable_lowest_count:
         return False
 
@@ -789,12 +1089,13 @@ def _candidate_from_draft(
     draft: CandidateDraft,
     *,
     reference: PredictionResult,
+    source: str,
     motifs: Iterable[str] | None,
     custom_restriction_sites: Iterable[str] | None,
 ) -> CdsCandidate:
     return _candidate_from_prediction(
         generation_index=draft.generation_index,
-        source="kazusa_diverse",
+        source=source,
         result=PredictionResult(
             amino_acids=reference.amino_acids,
             cds=draft.cds,
@@ -960,6 +1261,10 @@ def _validate_options(options: CandidateGenerationOptions) -> None:
         raise ValueError("max_difference_percent must be greater than 0.")
     if options.min_difference_percent > options.max_difference_percent:
         raise ValueError("min_difference_percent must not exceed max_difference_percent.")
+    if options.max_codon_similarity_percent is not None and not (0 <= options.max_codon_similarity_percent <= 100):
+        raise ValueError("max_codon_similarity_percent must be between 0 and 100.")
+    if options.strategy not in _VALID_STRATEGIES:
+        raise ValueError(f"strategy must be one of {_VALID_STRATEGIES!r}.")
 
 
 def _hamming_with_length(left, right) -> int:

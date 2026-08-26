@@ -26,8 +26,22 @@ def test_docs_layout_is_the_reviewed_five_document_set():
     assert {path.name for path in DOCS.glob("*.md")} == ACTIVE_ROOT_DOCS
     assert {path.name for path in ADR_DIR.glob("*.md")} == {
         "ADR-0001-qualified-candidate-acceptance.md",
+        "ADR-0002-similarity-hard-threshold.md",
+        "ADR-0003-min-max-host-only-profile.md",
+        "ADR-0004-literature-informed-similarity-threshold.md",
+        "ADR-0005-temperature-sampling-strategy-and-min-max-ranking.md",
+        "ADR-0006-dynamic-source-reference-fetch.md",
+        "ADR-0007-codon-axis-only-similarity-gate.md",
         "README.md",
     }
+
+
+def test_adr_numbers_are_unique():
+    """A repeated ADR number means two decisions claim the same identity, so
+    every cross-reference to that number becomes ambiguous."""
+    numbers = [path.name.split("-")[1] for path in ADR_DIR.glob("ADR-*.md")]
+    assert numbers, "no ADR files found -- the glob or directory layout changed"
+    assert len(numbers) == len(set(numbers)), f"duplicate ADR numbers: {sorted(numbers)}"
 
 
 def test_handoff_preserves_required_sections_and_state_schema():

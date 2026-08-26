@@ -5,13 +5,29 @@ from itertools import combinations
 
 import torch
 
-from Model_PichiaCLM.core.analysis import analyze_cds, load_training_codon_reference
-from Model_PichiaCLM.core.biology import check_translation, translate_cds
+from Model_PichiaCLM.core.analysis import (
+    PUBLIC_PICHIA_PASTORIS_FRACTIONS,
+    MIN_MAX_WINDOW,
+    analyze_cds,
+    compare_min_max_profiles,
+    load_training_codon_reference,
+    min_max_profile,
+)
+from Model_PichiaCLM.core.biology import check_translation, split_codons, translate_cds
 from Model_PichiaCLM.core.candidates import (
+    PLACEHOLDER_MAX_CODON_SIMILARITY_PERCENT,
+    STRATEGY_TEMPERATURE_SAMPLING,
+    CandidateSubsetSelection,
+    MinMaxHarmonizationTarget,
+    _rank_subset_by_min_max,
     CandidateGenerationOptions,
+    CdsCandidate,
     codon_preference_stats,
     compare_cds,
     generate_cds_candidates,
+    pairwise_similarity_rows,
+    quality_summary,
+    select_low_similarity_subset,
 )
 from Model_PichiaCLM.core.codon_editor import (
     build_codon_cells,
@@ -243,6 +259,260 @@ class CandidateGenerationTests(unittest.TestCase):
         self.assertEqual(stats.lowest_preferred_count, 1)
         self.assertEqual(stats.avoidable_lowest_count, 1)
 
+    def test_similarity_subset_reports_unmet_constraint_instead_of_silently_passing(self) -> None:
+        reference_cds = "CCT" * 6
+        candidates = [
+            _make_candidate(rank=1, cds=reference_cds, reference_cds=reference_cds),
+            _make_candidate(rank=2, cds="CCT" * 5 + "CCC", reference_cds=reference_cds),
+        ]
+        pairwise = pairwise_similarity_rows(candidates)
+        self.assertEqual(pairwise[0].codon_similarity_percent, 83.33)
+
+        strict = select_low_similarity_subset(
+            candidates,
+            pairwise,
+            subset_size=2,
+            max_codon_similarity_percent=10.0,
+        )
+        self.assertFalse(strict.constraint_satisfied)
+        self.assertFalse(strict.threshold_is_placeholder)
+        self.assertEqual(strict.codon_similarity_threshold_percent, 10.0)
+        self.assertEqual(strict.max_codon_similarity_percent, 83.33)
+
+        lenient = select_low_similarity_subset(
+            candidates,
+            pairwise,
+            subset_size=2,
+            max_codon_similarity_percent=90.0,
+        )
+        self.assertTrue(lenient.constraint_satisfied)
+
+    def test_high_bp_similarity_alone_does_not_fail_the_gate(self) -> None:
+        """ADR-0007: the gate is codon-axis only.
+
+        This pair is in the same regime as real hLF candidates -- a minority of
+        codons changed, each at the wobble base -- which puts bp similarity far
+        above any useful ceiling while codon similarity stays low. Gating on bp
+        made the constraint permanently unsatisfiable, so it must not come back.
+        """
+        reference_cds = "CCT" * 8
+        candidates = [
+            _make_candidate(rank=1, cds=reference_cds, reference_cds=reference_cds),
+            _make_candidate(rank=2, cds="CCA" * 2 + "CCT" * 6, reference_cds=reference_cds),
+        ]
+        pairwise = pairwise_similarity_rows(candidates)
+        self.assertEqual(pairwise[0].codon_similarity_percent, 75.0)
+        self.assertEqual(pairwise[0].bp_similarity_percent, 91.67)
+
+        subset = select_low_similarity_subset(
+            candidates, pairwise, subset_size=2, max_codon_similarity_percent=80.0
+        )
+
+        self.assertTrue(
+            subset.constraint_satisfied,
+            "codon similarity 75% is under the 80% ceiling, so bp similarity 91.67% must not fail it",
+        )
+        self.assertEqual(subset.max_bp_similarity_percent, 91.67, "bp similarity is still reported")
+        self.assertFalse(hasattr(subset, "bp_similarity_threshold_percent"))
+
+    def test_similarity_subset_flags_placeholder_threshold_when_not_supplied(self) -> None:
+        reference_cds = "CCT" * 6
+        candidates = [
+            _make_candidate(rank=1, cds=reference_cds, reference_cds=reference_cds),
+            _make_candidate(rank=2, cds="CCT" * 5 + "CCC", reference_cds=reference_cds),
+        ]
+        pairwise = pairwise_similarity_rows(candidates)
+
+        default = select_low_similarity_subset(candidates, pairwise, subset_size=2)
+
+        self.assertTrue(default.threshold_is_placeholder)
+        self.assertEqual(default.codon_similarity_threshold_percent, PLACEHOLDER_MAX_CODON_SIMILARITY_PERCENT)
+        self.assertFalse(default.constraint_satisfied)
+
+
+class MinMaxHarmonizationRankingTests(unittest.TestCase):
+    """Ranking is exercised through the module-level helper rather than through
+    ``generate_cds_candidates`` because ``FakePredictor`` samples synonymous
+    codons uniformly (see the note on its ``predict_sample``), so it trips the
+    ADR-0001 avoidable-lowest gate on almost every draw once a sequence is long
+    enough to fill a %MinMax window. That is a property of the test double, not
+    of the real model -- measurements with the shipped weights are in
+    docs/EXECUTION_PLAN.md. Driving the helper directly keeps this test about
+    the ranking criterion instead of about the fake's draw distribution.
+    """
+
+    def _subset(self, ranks: list[int]) -> CandidateSubsetSelection:
+        return CandidateSubsetSelection(
+            requested_size=len(ranks),
+            selected_size=len(ranks),
+            selected_ranks=ranks,
+            method="test",
+            comparisons=1,
+            min_bp_similarity_percent=0.0,
+            mean_bp_similarity_percent=0.0,
+            max_bp_similarity_percent=0.0,
+            min_codon_similarity_percent=0.0,
+            mean_codon_similarity_percent=0.0,
+            max_codon_similarity_percent=0.0,
+            codon_similarity_threshold_percent=80.0,
+            threshold_is_placeholder=True,
+            constraint_satisfied=True,
+        )
+
+    def test_candidate_matching_the_source_shape_is_ranked_first(self) -> None:
+        source_cds = "GCG" * 20 + "GCT" * 20
+        mirrors_source = "GCG" * 20 + "GCT" * 20
+        inverts_source = "GCT" * 20 + "GCG" * 20
+        candidates = [
+            _make_candidate(rank=1, cds=inverts_source, reference_cds=source_cds),
+            _make_candidate(rank=2, cds=mirrors_source, reference_cds=source_cds),
+        ]
+        target = MinMaxHarmonizationTarget(
+            source_cds=source_cds,
+            source_fractions=PUBLIC_PICHIA_PASTORIS_FRACTIONS,
+        )
+
+        ranked = _rank_subset_by_min_max(self._subset([1, 2]), candidates, harmonization_target=target)
+
+        self.assertEqual(ranked.selected_ranks, [2, 1])
+        self.assertEqual(ranked.selected_size, 2, "ranking must reorder only, never drop candidates")
+
+    def test_harmonization_target_is_honored_under_the_default_strategy(self) -> None:
+        """A supplied target must not be silently dropped just because the
+        default generation strategy is in use -- the caller would get an
+        unranked subset that looks ranked."""
+        predictor = FakePredictor()
+        target = MinMaxHarmonizationTarget(
+            source_cds="CCG" * 20,
+            source_fractions=PUBLIC_PICHIA_PASTORIS_FRACTIONS,
+        )
+        result = generate_cds_candidates(
+            predictor,
+            "MSTNPKPQR",
+            options=CandidateGenerationOptions(num_candidates=4, subset_size=3, seed=5),
+            harmonization_target=target,
+        )
+        self.assertEqual(result.recommended_subset.ranking_criterion, "harmonization")
+
+    def test_default_strategy_without_target_reports_no_reranking(self) -> None:
+        predictor = FakePredictor()
+        result = generate_cds_candidates(
+            predictor,
+            "MSTNPKPQR",
+            options=CandidateGenerationOptions(num_candidates=4, subset_size=3, seed=5),
+        )
+        self.assertEqual(result.recommended_subset.ranking_criterion, "none")
+
+    def test_temperature_sampling_without_target_uses_host_dip_criterion(self) -> None:
+        predictor = FakePredictor()
+        result = generate_cds_candidates(
+            predictor,
+            "MSTNPKPQR",
+            options=CandidateGenerationOptions(
+                num_candidates=4,
+                subset_size=3,
+                seed=5,
+                strategy=STRATEGY_TEMPERATURE_SAMPLING,
+            ),
+        )
+        self.assertEqual(result.recommended_subset.ranking_criterion, "host_worst_dip")
+
+    def test_without_a_target_it_falls_back_to_the_host_only_dip_criterion(self) -> None:
+        source_cds = "GCG" * 20 + "GCT" * 20
+        candidates = [
+            _make_candidate(rank=1, cds="GCT" * 20 + "GCG" * 20, reference_cds=source_cds),
+            _make_candidate(rank=2, cds="GCG" * 20 + "GCT" * 20, reference_cds=source_cds),
+        ]
+
+        ranked = _rank_subset_by_min_max(self._subset([1, 2]), candidates)
+
+        self.assertEqual(sorted(ranked.selected_ranks), [1, 2])
+
+
+class MinMaxProfileComparisonTests(unittest.TestCase):
+    def test_identical_profiles_have_zero_distance(self) -> None:
+        profile = min_max_profile(["GCT"] * MIN_MAX_WINDOW, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        comparison = compare_min_max_profiles(profile, profile)
+        self.assertEqual(comparison.mean_absolute_difference, 0.0)
+        self.assertEqual(comparison.max_absolute_difference, 0.0)
+        self.assertEqual(comparison.comparable_windows, len(profile))
+        self.assertEqual(comparison.skipped_windows, 0)
+
+    def test_opposite_profiles_are_maximally_distant(self) -> None:
+        fastest = min_max_profile(["GCT"] * MIN_MAX_WINDOW, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        slowest = min_max_profile(["GCG"] * MIN_MAX_WINDOW, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        comparison = compare_min_max_profiles(fastest, slowest)
+        self.assertEqual(comparison.mean_absolute_difference, 200.0)
+
+    def test_length_mismatch_raises_instead_of_aligning_silently(self) -> None:
+        short = min_max_profile(["GCT"] * MIN_MAX_WINDOW, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        long = min_max_profile(["GCT"] * (MIN_MAX_WINDOW + 3), PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        with self.assertRaisesRegex(ValueError, "different window counts"):
+            compare_min_max_profiles(short, long)
+
+    def test_windows_without_comparable_codons_are_skipped_not_counted_as_agreement(self) -> None:
+        untranslatable = min_max_profile(["ATG"] * MIN_MAX_WINDOW, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        real = min_max_profile(["GCT"] * MIN_MAX_WINDOW, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        comparison = compare_min_max_profiles(untranslatable, real)
+        self.assertEqual(comparison.comparable_windows, 0)
+        self.assertEqual(comparison.skipped_windows, len(real))
+        self.assertIsNone(comparison.mean_absolute_difference)
+
+
+class MinMaxProfileTests(unittest.TestCase):
+    def test_all_top_preferred_codons_score_near_positive_100(self) -> None:
+        codons = ["GCT"] * MIN_MAX_WINDOW
+        windows = min_max_profile(codons, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0].percent, 100.0)
+        self.assertEqual(windows[0].start_codon, 1)
+        self.assertEqual(windows[0].end_codon, MIN_MAX_WINDOW)
+
+    def test_all_lowest_preferred_codons_score_near_negative_100(self) -> None:
+        codons = ["GCG"] * MIN_MAX_WINDOW
+        windows = min_max_profile(codons, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        self.assertEqual(windows[0].percent, -100.0)
+
+    def test_profile_is_empty_when_shorter_than_window(self) -> None:
+        windows = min_max_profile(["GCT"] * (MIN_MAX_WINDOW - 1), PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        self.assertEqual(windows, [])
+
+    def test_profile_slides_one_codon_at_a_time(self) -> None:
+        codons = ["GCT"] * (MIN_MAX_WINDOW + 2)
+        windows = min_max_profile(codons, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        self.assertEqual(len(windows), 3)
+        self.assertEqual([window.start_codon for window in windows], [1, 2, 3])
+
+    def test_window_with_no_comparable_codons_is_reported_not_dropped(self) -> None:
+        codons = ["ATG"] * MIN_MAX_WINDOW  # Met has only one codon, no faster/slower choice
+        windows = min_max_profile(codons, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0].start_codon, 1)
+        self.assertEqual(windows[0].end_codon, MIN_MAX_WINDOW)
+        self.assertIsNone(windows[0].percent)
+
+    def test_start_codon_numbering_stays_contiguous_across_a_gap(self) -> None:
+        codons = ["ATG"] * MIN_MAX_WINDOW + ["GCT"] * MIN_MAX_WINDOW
+        windows = min_max_profile(codons, PUBLIC_PICHIA_PASTORIS_FRACTIONS)
+        self.assertEqual([window.start_codon for window in windows], list(range(1, len(codons) - MIN_MAX_WINDOW + 2)))
+        self.assertIsNone(windows[0].percent)
+        self.assertIsNotNone(windows[-1].percent)
+
+
+def _make_candidate(*, rank: int, cds: str, reference_cds: str) -> CdsCandidate:
+    analysis = analyze_cds(cds)
+    return CdsCandidate(
+        rank=rank,
+        generation_index=rank,
+        source="test",
+        cds=cds,
+        codon_ids=[],
+        analysis=analysis,
+        quality=quality_summary(analysis),
+        difference_from_reference=compare_cds(cds, reference_cds),
+        codon_preference=codon_preference_stats(cds),
+    )
+
 
 class FakePredictor:
     device = torch.device("cpu")
@@ -283,6 +553,13 @@ class FakePredictor:
             if len(choices) == 1:
                 selected = 0
             else:
+                # NOTE: equal weights -> multinomial normalizes them, so this
+                # draws UNIFORMLY and `temperature` has no effect here. The real
+                # predictor uses softmax(logits / temperature), which concentrates
+                # mass on preferred codons. This fake is therefore a worst case
+                # for any gate that penalizes rare codons (e.g. the ADR-0001
+                # avoidable-lowest check) -- do not use it to estimate how many
+                # candidates the temperature-sampling strategy yields in practice.
                 weights = torch.ones(len(choices)) / temperature
                 selected = torch.multinomial(weights, 1, generator=generator).item()
             codons.append(choices[selected])

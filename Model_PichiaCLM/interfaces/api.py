@@ -13,6 +13,7 @@ from Model_PichiaCLM.core.analysis import analyze_cds, load_training_codon_refer
 from Model_PichiaCLM.core.config import DEFAULT_WEIGHTS_PATH
 from Model_PichiaCLM.core.postprocess import conservative_postprocess
 from Model_PichiaCLM.core.predictor import PichiaCLMPredictor
+from Model_PichiaCLM.core.source_reference import build_harmonization_target
 
 
 class SequenceRecord(BaseModel):
@@ -53,6 +54,13 @@ class PredictCandidatesRequest(BaseModel):
     temperature: float = Field(default=0.8, gt=0)
     seed: int | None = None
     allow_unknown: bool = False
+    strategy: str = Field(default="kazusa_diverse", examples=["kazusa_diverse", "temperature_sampling"])
+    max_codon_similarity_percent: float | None = Field(default=None, ge=0, le=100)
+    # Source-organism harmonization target (ADR-0006). Both must be supplied
+    # together: the native CDS says which synonymous codon the source organism
+    # actually used, and the taxon id resolves that organism's usage table.
+    source_taxon_id: int | None = Field(default=None, examples=[9606])
+    source_native_cds: str | None = None
     unwanted_motifs: list[str] = Field(default_factory=list)
     custom_restriction_sites: list[str] = Field(default_factory=list)
 
@@ -186,6 +194,10 @@ def predict_batch(request: PredictBatchRequest) -> dict[str, object]:
 @app.post("/predict_candidates", response_model=PredictCandidatesResponse)
 def predict_candidates(request: PredictCandidatesRequest) -> dict[str, object]:
     try:
+        harmonization_target = build_harmonization_target(
+            source_taxon_id=request.source_taxon_id,
+            source_native_cds=request.source_native_cds,
+        )
         candidate_set = get_predictor_with_candidates().predict_candidates(
             request.amino_acids,
             allow_unknown=request.allow_unknown,
@@ -193,11 +205,18 @@ def predict_candidates(request: PredictCandidatesRequest) -> dict[str, object]:
             temperature=request.temperature,
             seed=request.seed,
             subset_size=request.subset_size,
+            strategy=request.strategy,
+            max_codon_similarity_percent=request.max_codon_similarity_percent,
+            harmonization_target=harmonization_target,
             motifs=request.unwanted_motifs,
             custom_restriction_sites=request.custom_restriction_sites,
         )
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        # Source-organism data could not be fetched and was not cached. Surfaced
+        # as an error rather than falling back to a host table (ADR-0006).
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return asdict(candidate_set)
 
 
