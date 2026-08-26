@@ -899,43 +899,6 @@ def render_candidate_set_result(result: dict[str, object]) -> None:
             mime="text/csv",
         )
         render_min_max_profiles(selected_candidates)
-
-
-def render_min_max_profiles(candidates: list[dict[str, object]]) -> None:
-    """Plot each recommended candidate's %MinMax curve under host frequencies.
-
-    Computed here from the returned CDS rather than shipped in the response so
-    the API contract stays unchanged; the curve is review information, not a
-    pass/fail verdict.
-    """
-    from Model_PichiaCLM.core.analysis import load_training_codon_reference, min_max_profile
-    from Model_PichiaCLM.core.biology import split_codons
-
-    if not candidates:
-        return
-    host_fractions, _ = load_training_codon_reference()
-    series: dict[str, dict[int, float]] = {}
-    for candidate in candidates:
-        windows = min_max_profile(split_codons(candidate["cds"]), host_fractions)
-        points = {window.start_codon: window.percent for window in windows if window.percent is not None}
-        if points:
-            series[f"候选 {candidate['rank']}"] = points
-
-    st.subheader("%MinMax 局部翻译速度谱（相对宿主频率）")
-    if not series:
-        st.caption(
-            "序列长度不足一个 %MinMax 窗口（18 个密码子），无法绘制曲线——这是「算不了」，不是「结果不好」。"
-        )
-        return
-    positions = sorted({position for points in series.values() for position in points})
-    st.line_chart(
-        {name: [points.get(position) for position in positions] for name, points in series.items()}
-    )
-    st.caption(
-        "横轴是窗口起始密码子位置，纵轴 +100 表示该段全用同义家族里最常用的密码子，-100 表示全用最不常用的；"
-        "负值的谷是相对宿主的潜在翻译暂停位点。这是供人工审查的信息，不单独决定候选是否合格。"
-    )
-
     fasta_records = [
         FastaRecord(
             id=f"candidate_{candidate['rank']}_{candidate['source']}",
@@ -987,6 +950,43 @@ def render_min_max_profiles(candidates: list[dict[str, object]]) -> None:
         file_name="pichiaclm_candidates.json",
         mime="application/json",
     )
+
+
+def render_min_max_profiles(candidates: list[dict[str, object]]) -> None:
+    """Plot each recommended candidate's %MinMax curve under host frequencies.
+
+    Computed here from the returned CDS rather than shipped in the response so
+    the API contract stays unchanged; the curve is review information, not a
+    pass/fail verdict.
+    """
+    from Model_PichiaCLM.core.analysis import load_training_codon_reference, min_max_profile
+    from Model_PichiaCLM.core.biology import split_codons
+
+    if not candidates:
+        return
+    host_fractions, _ = load_training_codon_reference()
+    series: dict[str, dict[int, float]] = {}
+    for candidate in candidates:
+        windows = min_max_profile(split_codons(candidate["cds"]), host_fractions)
+        points = {window.start_codon: window.percent for window in windows if window.percent is not None}
+        if points:
+            series[f"候选 {candidate['rank']}"] = points
+
+    st.subheader("%MinMax 局部翻译速度谱（相对宿主频率）")
+    if not series:
+        st.caption(
+            "序列长度不足一个 %MinMax 窗口（18 个密码子），无法绘制曲线——这是「算不了」，不是「结果不好」。"
+        )
+        return
+    positions = sorted({position for points in series.values() for position in points})
+    st.line_chart(
+        {name: [points.get(position) for position in positions] for name, points in series.items()}
+    )
+    st.caption(
+        "横轴是窗口起始密码子位置，纵轴 +100 表示该段全用同义家族里最常用的密码子，-100 表示全用最不常用的；"
+        "负值的谷是相对宿主的潜在翻译暂停位点。这是供人工审查的信息，不单独决定候选是否合格。"
+    )
+
 
 
 def sidebar_settings() -> dict[str, object]:
