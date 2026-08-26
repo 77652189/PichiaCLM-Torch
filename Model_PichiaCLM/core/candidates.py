@@ -176,6 +176,15 @@ class CandidateSubsetSelection:
     # proxy, ADR-0005), or "none" (order left as selected). Reported so a
     # reader can tell which criterion produced the order instead of guessing.
     ranking_criterion: str = "none"
+    # Harmonization fit, reported only when a source target was supplied
+    # (ADR-0009). The baseline is the model's own reference CDS measured the
+    # same way, so "good enough" is answered against a real alternative rather
+    # than against an invented threshold: if the best candidate is no closer to
+    # the source profile than the baseline already was, harmonization ranking
+    # had nothing better to offer and that must be said, not implied by an
+    # ordering that looks meaningful.
+    harmonization_best_distance: float | None = None
+    harmonization_reference_distance: float | None = None
 
 
 @dataclass(frozen=True)
@@ -331,7 +340,10 @@ def generate_cds_candidates(
         harmonization_target is not None or options.strategy == STRATEGY_TEMPERATURE_SAMPLING
     ):
         recommended_subset = _rank_subset_by_min_max(
-            recommended_subset, candidates, harmonization_target=harmonization_target
+            recommended_subset,
+            candidates,
+            harmonization_target=harmonization_target,
+            reference_cds=reference.cds,
         )
     exhausted = len(candidates) < requested
     note = None
@@ -563,6 +575,7 @@ def _rank_subset_by_min_max(
     candidates: list[CdsCandidate],
     *,
     harmonization_target: MinMaxHarmonizationTarget | None = None,
+    reference_cds: str = "",
 ) -> CandidateSubsetSelection:
     """Reorder an already-chosen subset's ranks by %MinMax preference.
 
@@ -583,6 +596,12 @@ def _rank_subset_by_min_max(
 
     Ranks whose profile could not be computed or compared sort last: that is
     "not comparable", not "worse".
+
+    In the harmonization case the selection also carries how close the best
+    candidate got, alongside the same measurement for ``reference_cds`` as a
+    baseline (ADR-0009). Ordering alone cannot tell a reader whether the
+    winner is actually a good match or merely the least bad of a poor pool;
+    the baseline answers that without inventing a threshold.
     """
     training_fractions, _ = load_training_codon_reference()
     candidate_by_rank = {candidate.rank: candidate for candidate in candidates}
@@ -610,7 +629,16 @@ def _rank_subset_by_min_max(
         subset.selected_ranks,
         key=lambda rank: (distance_by_rank[rank] is None, distance_by_rank[rank] or 0.0),
     )
-    return replace(subset, selected_ranks=ordered_ranks, ranking_criterion="harmonization")
+    measured = [value for value in distance_by_rank.values() if value is not None]
+    return replace(
+        subset,
+        selected_ranks=ordered_ranks,
+        ranking_criterion="harmonization",
+        harmonization_best_distance=min(measured) if measured else None,
+        harmonization_reference_distance=_harmonization_distance(
+            reference_cds, training_fractions, source_profile
+        ),
+    )
 
 
 def _harmonization_distance(

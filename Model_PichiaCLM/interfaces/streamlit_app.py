@@ -858,6 +858,7 @@ def render_candidate_set_result(result: dict[str, object]) -> None:
                 recommended_subset.get("ranking_criterion", "none"),
             )
         )
+        render_harmonization_fit(recommended_subset)
         subset_pair_rows = [
             {
                 "候选 A": row["left_rank"],
@@ -949,6 +950,47 @@ def render_candidate_set_result(result: dict[str, object]) -> None:
         data=json_dumps(result),
         file_name="pichiaclm_candidates.json",
         mime="application/json",
+    )
+
+
+def render_harmonization_fit(subset: dict[str, object]) -> None:
+    """Report how well the best candidate reproduces the source profile.
+
+    Ordering alone cannot say whether the winner is a good match or just the
+    least bad of a poor pool, so this compares it against the baseline design
+    measured the same way (ADR-0009).
+    """
+    if subset.get("ranking_criterion") != "harmonization":
+        return
+    best = subset.get("harmonization_best_distance")
+    baseline = subset.get("harmonization_reference_distance")
+
+    if best is None:
+        st.warning(
+            "harmonization 吻合度：**无法计算**。候选序列短于一个 %MinMax 窗口（18 个密码子），"
+            "或源曲线为空，所以排序实际上没有依据可用——这是「算不了」，不是「吻合得好」。"
+        )
+        return
+    if baseline is None:
+        st.info(f"harmonization 吻合度：最佳候选与源曲线的平均绝对差 {best}（无基准可对比）。")
+        return
+
+    if best < baseline:
+        st.success(
+            f"harmonization 吻合度：最佳候选 {best}，优于基准设计 {baseline}"
+            f"（平均绝对差，越小越接近源基因的翻译节奏）。"
+        )
+    else:
+        st.error(
+            f"harmonization 吻合度：**没有候选优于基准**。最佳候选为 {best}，基准设计本身是 {baseline}"
+            "（平均绝对差，越小越好）。排序仍然给出了顺序，但这一组里没有哪条比基准更接近源基因的"
+            "翻译节奏——不要把排第一当作「已完成 harmonization」。可尝试增大候选数量、改用温度采样路径，"
+            "或确认源 CDS 是否确实对应这段设计。"
+        )
+    st.caption(
+        "基准是模型自身的参考 CDS，用同一套方法测得——因此这里回答的是「有没有比不做更好」，"
+        "而不是拿一个没有依据的阈值去判合格（ADR-0009）。这仍是密码子层面的形状比较，"
+        "不预测折叠结果或表达量。"
     )
 
 
@@ -1070,7 +1112,7 @@ def render_candidates_tab(settings: dict[str, object]) -> None:
             "属于该门槛，不是随机种子问题；可改用左侧的随机同义替换路径。"
         )
 
-    with st.expander("相似度硬门槛与 %MinMax 排序（可选）", expanded=False):
+    with st.expander("相似度硬门槛与 %MinMax 排序（可选）", expanded=True):
         use_custom_threshold = st.checkbox(
             "自定义密码子相似度上限（不勾选则使用文献参考占位值 80%）",
             value=False,

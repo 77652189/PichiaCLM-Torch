@@ -377,6 +377,62 @@ class MinMaxHarmonizationRankingTests(unittest.TestCase):
         self.assertEqual(ranked.selected_ranks, [2, 1])
         self.assertEqual(ranked.selected_size, 2, "ranking must reorder only, never drop candidates")
 
+    def test_fit_is_reported_against_the_baseline_design(self) -> None:
+        """ADR-0009: ordering alone cannot say whether the winner is a good
+        match, so the selection carries both the best distance and the same
+        measurement for the reference CDS."""
+        predictor = FakePredictor()
+        target = MinMaxHarmonizationTarget(
+            source_cds=predictor.predict("P" * 30).cds,
+            source_fractions=PUBLIC_PICHIA_PASTORIS_FRACTIONS,
+        )
+        result = generate_cds_candidates(
+            predictor,
+            "P" * 30,
+            options=CandidateGenerationOptions(num_candidates=5, subset_size=3, seed=3),
+            harmonization_target=target,
+        )
+        subset = result.recommended_subset
+        self.assertEqual(subset.ranking_criterion, "harmonization")
+        self.assertIsNotNone(subset.harmonization_best_distance)
+        self.assertIsNotNone(subset.harmonization_reference_distance)
+        self.assertGreaterEqual(subset.harmonization_best_distance, 0.0)
+        self.assertGreaterEqual(subset.harmonization_reference_distance, 0.0)
+
+        # Even though the source CDS here is byte-identical to the reference,
+        # the baseline distance is not zero: the two curves are measured under
+        # different frequency tables (source organism vs host) by design. That
+        # is precisely why ADR-0009 reports against this baseline instead of
+        # judging the raw number against some absolute threshold.
+        self.assertGreater(subset.harmonization_reference_distance, 0.0)
+
+        # best_distance must be the minimum over the selected subset, so the
+        # reported figure and the ordering cannot drift apart.
+        host_fractions, _ = load_training_codon_reference()
+        source_profile = min_max_profile(
+            split_codons(target.source_cds), PUBLIC_PICHIA_PASTORIS_FRACTIONS
+        )
+        by_rank = {candidate.rank: candidate for candidate in result.candidates}
+        recomputed = [
+            compare_min_max_profiles(
+                source_profile,
+                min_max_profile(split_codons(by_rank[rank].cds), host_fractions),
+            ).mean_absolute_difference
+            for rank in subset.selected_ranks
+        ]
+        self.assertEqual(subset.harmonization_best_distance, min(v for v in recomputed if v is not None))
+
+    def test_fit_fields_stay_empty_without_a_harmonization_target(self) -> None:
+        predictor = FakePredictor()
+        result = generate_cds_candidates(
+            predictor,
+            "MSTNPKPQR",
+            options=CandidateGenerationOptions(num_candidates=4, subset_size=3, seed=5),
+        )
+        subset = result.recommended_subset
+        self.assertIsNone(subset.harmonization_best_distance)
+        self.assertIsNone(subset.harmonization_reference_distance)
+
     def test_source_cds_encoding_a_different_protein_is_rejected(self) -> None:
         """ADR-0008: the source CDS must already be aligned to the design.
 

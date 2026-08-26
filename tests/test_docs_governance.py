@@ -33,6 +33,7 @@ def test_docs_layout_is_the_reviewed_five_document_set():
         "ADR-0006-dynamic-source-reference-fetch.md",
         "ADR-0007-codon-axis-only-similarity-gate.md",
         "ADR-0008-aligned-mature-peptide-source-cds.md",
+        "ADR-0009-harmonization-fit-against-baseline.md",
         "README.md",
     }
 

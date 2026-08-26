@@ -61,6 +61,33 @@ class CandidatesTabRendersWithoutError(unittest.TestCase):
         captions = " ".join(str(e.value) for e in app.caption)
         self.assertIn("harmonization", captions)
 
+    def test_harmonization_fit_is_reported_alongside_the_ranking(self) -> None:
+        """ADR-0009: the page must say whether the top-ranked candidate is
+        actually closer to the source profile than the baseline design, not
+        just present an ordering."""
+        app = _candidates_tab_run(
+            amino_acids=LONG_AA,
+            harmonize=True,
+            source_cds=ALIGNED_SOURCE_CDS,
+        )
+        self.assertFalse(app.exception, [str(e) for e in app.exception])
+        reported = " ".join(
+            str(e.value) for e in list(app.success) + list(app.error) + list(app.warning) + list(app.info)
+        )
+        self.assertIn("harmonization 吻合度", reported)
+
+    def test_similarity_panel_is_visible_without_expanding_it(self) -> None:
+        """The harmonization controls were previously two clicks deep, so a
+        researcher could miss them entirely."""
+        app = AppTest.from_file(str(APP), default_timeout=RUN_TIMEOUT)
+        app.run()
+        panels = [e for e in app.expander if "%MinMax" in e.proto.label]
+        self.assertTrue(panels, "similarity/%MinMax panel not found")
+        self.assertTrue(
+            all(e.proto.expanded for e in panels),
+            "the similarity/%MinMax panel should start expanded",
+        )
+
     def test_misaligned_source_cds_surfaces_an_actionable_error(self) -> None:
         """ADR-0008: a source CDS for a different protein must be refused in the
         UI with an explanation, not silently ignored or crash the page."""
