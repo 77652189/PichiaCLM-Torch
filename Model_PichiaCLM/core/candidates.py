@@ -12,6 +12,7 @@ import torch
 
 from .analysis import (
     AA_TO_CODONS,
+    CODON_TO_AA,
     GLOBAL_GC_MAX,
     GLOBAL_GC_MIN,
     HOMOPOLYMER_MIN_LENGTH,
@@ -24,7 +25,7 @@ from .analysis import (
     load_training_codon_reference,
     min_max_profile,
 )
-from .biology import check_translation, normalize_motifs, split_codons
+from .biology import check_translation, normalize_dna, normalize_motifs, split_codons
 from .restriction import parse_custom_sites, scan_restriction_sites
 from .schemas import PredictionResult
 from .vocab import build_vocabularies
@@ -258,6 +259,9 @@ def generate_cds_candidates(
     reference = predictor.predict(amino_acids, allow_unknown=allow_unknown)
     if not _is_translation_consistent(reference):
         raise ValueError("Reference CDS does not translate back to the input amino acid sequence.")
+
+    if harmonization_target is not None:
+        harmonization_target = _validated_harmonization_target(harmonization_target, reference.amino_acids)
 
     reference_analysis = analyze_cds(
         reference.cds,
@@ -501,6 +505,51 @@ def select_low_similarity_subset(
         codon_threshold=codon_threshold,
         threshold_is_placeholder=threshold_is_placeholder,
     )
+
+
+def _validated_harmonization_target(
+    target: MinMaxHarmonizationTarget,
+    amino_acids: str,
+) -> MinMaxHarmonizationTarget:
+    """Require the source CDS to already be aligned to the design (ADR-0008).
+
+    %MinMax profiles are compared window by window, so position *i* of the
+    source curve must describe the same residue as position *i* of the
+    candidate curve. Rather than guess how to align them -- trimming a signal
+    peptide, choosing an isoform, inserting gaps -- this requires the caller
+    to supply a CDS that already encodes exactly the same mature peptide, and
+    verifies it by translation.
+
+    Translation equality is a stronger check than equal length: it also
+    catches a wrong isoform, a frameshift, or a signal peptide left in that
+    happens to have a matching codon count. A single trailing stop codon is
+    accepted and dropped, since database CDS records usually include one.
+    """
+    source_cds = normalize_dna(target.source_cds)
+    if not source_cds:
+        raise ValueError("Harmonization source CDS is empty.")
+    if len(source_cds) % 3 != 0:
+        raise ValueError(
+            f"Harmonization source CDS length ({len(source_cds)} nt) is not a multiple of 3, so it cannot be "
+            "read as codons. Supply the aligned mature-peptide coding sequence."
+        )
+
+    codons = split_codons(source_cds)
+    if codons and CODON_TO_AA.get(codons[-1]) == "*":
+        codons = codons[:-1]
+        source_cds = "".join(codons)
+
+    translated = "".join(CODON_TO_AA.get(codon, "X") for codon in codons)
+    if translated != amino_acids:
+        raise ValueError(
+            "Harmonization source CDS does not encode the same protein as the design "
+            f"(source translates to {len(translated)} aa, design is {len(amino_acids)} aa). "
+            "%MinMax curves are compared position by position, so the source CDS must already be aligned: "
+            "supply the native coding sequence of the same mature peptide, with any signal peptide and "
+            "vector sequence removed and no internal gaps. This tool does not trim or align it for you, "
+            "because guessing the alignment would silently compare unrelated positions."
+        )
+    return replace(target, source_cds=source_cds)
 
 
 def _resolve_similarity_threshold(max_codon_similarity_percent: float | None) -> tuple[float, bool]:

@@ -1101,11 +1101,16 @@ def render_candidates_tab(settings: dict[str, object]) -> None:
         )
         source_native_cds = (
             st.text_area(
-                "源基因天然 CDS（由研发组同事提供，需与设计逐密码子对齐）",
+                "源基因天然 CDS（由研发组同事提供**已对齐的成熟肽 CDS**）",
                 value="",
                 height=110,
                 key="candidate_source_cds",
-                help="氨基酸序列不能代替：它不携带源物种当年在每个位置具体选了哪个同义密码子。",
+                help=(
+                    "必须翻译成与上方设计完全相同的氨基酸序列：去掉信号肽和载体序列，中间不留空缺"
+                    "（末尾终止密码子可以保留，会自动忽略）。工具不代为裁剪或比对——猜错对齐方式会"
+                    "静默地比较到不相干的位点（ADR-0008）。氨基酸序列本身不能代替这条 CDS："
+                    "它不携带源物种当年在每个位置具体选了哪个同义密码子。"
+                ),
             ).strip()
             or None
             if use_harmonization

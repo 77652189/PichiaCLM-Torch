@@ -377,13 +377,65 @@ class MinMaxHarmonizationRankingTests(unittest.TestCase):
         self.assertEqual(ranked.selected_ranks, [2, 1])
         self.assertEqual(ranked.selected_size, 2, "ranking must reorder only, never drop candidates")
 
+    def test_source_cds_encoding_a_different_protein_is_rejected(self) -> None:
+        """ADR-0008: the source CDS must already be aligned to the design.
+
+        A signal peptide left in, or the wrong isoform, would shift every
+        window against the candidate curve while still producing plausible
+        numbers -- so this must fail loudly rather than be aligned by guesswork.
+        """
+        predictor = FakePredictor()
+        target = MinMaxHarmonizationTarget(
+            source_cds="ATG" + "CCT" * 8,  # encodes MPPPPPPPP, design is MSTNPKPQR
+            source_fractions=PUBLIC_PICHIA_PASTORIS_FRACTIONS,
+        )
+        with self.assertRaisesRegex(ValueError, "does not encode the same protein"):
+            generate_cds_candidates(
+                predictor,
+                "MSTNPKPQR",
+                options=CandidateGenerationOptions(num_candidates=3, subset_size=2, seed=5),
+                harmonization_target=target,
+            )
+
+    def test_source_cds_with_a_trailing_stop_codon_is_accepted(self) -> None:
+        """Database CDS records normally carry a stop codon; that is a format
+        difference, not a misalignment."""
+        predictor = FakePredictor()
+        aligned = predictor.predict("MSTNPKPQR").cds
+        target = MinMaxHarmonizationTarget(
+            source_cds=aligned + "TAA",
+            source_fractions=PUBLIC_PICHIA_PASTORIS_FRACTIONS,
+        )
+        result = generate_cds_candidates(
+            predictor,
+            "MSTNPKPQR",
+            options=CandidateGenerationOptions(num_candidates=3, subset_size=2, seed=5),
+            harmonization_target=target,
+        )
+        self.assertEqual(result.recommended_subset.ranking_criterion, "harmonization")
+
+    def test_source_cds_with_a_broken_reading_frame_is_rejected(self) -> None:
+        predictor = FakePredictor()
+        target = MinMaxHarmonizationTarget(
+            source_cds="ATGCC",
+            source_fractions=PUBLIC_PICHIA_PASTORIS_FRACTIONS,
+        )
+        with self.assertRaisesRegex(ValueError, "not a multiple of 3"):
+            generate_cds_candidates(
+                predictor,
+                "MSTNPKPQR",
+                options=CandidateGenerationOptions(num_candidates=3, subset_size=2, seed=5),
+                harmonization_target=target,
+            )
+
     def test_harmonization_target_is_honored_under_the_default_strategy(self) -> None:
         """A supplied target must not be silently dropped just because the
         default generation strategy is in use -- the caller would get an
         unranked subset that looks ranked."""
         predictor = FakePredictor()
         target = MinMaxHarmonizationTarget(
-            source_cds="CCG" * 20,
+            # Aligned by construction: encodes exactly the design's protein.
+            source_cds=predictor.predict("MSTNPKPQR").cds,
             source_fractions=PUBLIC_PICHIA_PASTORIS_FRACTIONS,
         )
         result = generate_cds_candidates(

@@ -9,3 +9,4 @@
 | [ADR-0005](ADR-0005-temperature-sampling-strategy-and-min-max-ranking.md) | 新增温度采样策略，用 %MinMax 排序其结果 | accepted（"源物种对比不适用"一条已被 ADR-0006 取代） | 与随机同义替换同级的第二条生成路径，不套用 10%–20% 差异区间；%MinMax 只排序通过相似度门槛的候选，不合成分数。 |
 | [ADR-0006](ADR-0006-dynamic-source-reference-fetch.md) | 源物种参考数据动态获取 + 本地缓存 | accepted | hLF/OPN 是人源异源表达，源物种对比适用；人类密码子频率表与天然 CDS 都按需抓取并缓存，支持手动输入，抓不到就报错不退回宿主数据。 |
 | [ADR-0007](ADR-0007-codon-axis-only-similarity-gate.md) | 硬门槛只用密码子轴 | accepted | hLF 实测 bp 相似度下限 88%，80% 阈值不可达导致门槛恒红；bp 轴移除，降级为展示信息，codon 轴照常。 |
+| [ADR-0008](ADR-0008-aligned-mature-peptide-source-cds.md) | harmonization 要求已对齐的成熟肽 CDS | accepted | 源 CDS 必须翻译成与设计完全相同的氨基酸序列，生成一开始就校验；工具不代为裁剪信号肽或做比对对齐。 |

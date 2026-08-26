@@ -31,7 +31,9 @@
 6. `docs/adr/ADR-0004-literature-informed-similarity-threshold.md`
 7. `docs/adr/ADR-0005-temperature-sampling-strategy-and-min-max-ranking.md`
 8. `docs/adr/ADR-0006-dynamic-source-reference-fetch.md`
-9. `docs/EXECUTION_PLAN.md`
+9. `docs/adr/ADR-0007-codon-axis-only-similarity-gate.md`
+10. `docs/adr/ADR-0008-aligned-mature-peptide-source-cds.md`
+11. `docs/EXECUTION_PLAN.md`
 
 ## 验证方式
 
