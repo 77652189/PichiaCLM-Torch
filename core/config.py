@@ -3,6 +3,7 @@ from pathlib import Path
 
 DEFAULT_WEIGHTS_PATH = (
     Path(__file__).resolve().parents[1]
+    / "Model_PichiaCLM"
     / "Training"
     / "PichiaData"
     / "2Target_AllData"

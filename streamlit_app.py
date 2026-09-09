@@ -5,8 +5,8 @@ from dataclasses import asdict
 import requests
 import streamlit as st
 
-from Model_PichiaCLM.core.config import DEFAULT_WEIGHTS_PATH
-from Model_PichiaCLM.core.predictor import PichiaCLMPredictor
+from core.config import DEFAULT_WEIGHTS_PATH
+from core.predictor import PichiaCLMPredictor
 
 
 DEFAULT_SEQUENCE = "MSTNPKPQR"
