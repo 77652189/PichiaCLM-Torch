@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 uvicorn.*.log
 streamlit.*.log
+.ipynb_checkpoints
